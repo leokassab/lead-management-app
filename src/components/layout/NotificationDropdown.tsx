@@ -117,7 +117,7 @@ export default function NotificationDropdown() {
     <div className="relative">
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="relative p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-full transition-colors"
+        className="relative p-2 text-gray-300 hover:text-white hover:bg-white/10 rounded-full transition-colors"
       >
         <svg
           className="w-6 h-6"

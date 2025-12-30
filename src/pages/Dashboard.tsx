@@ -185,9 +185,9 @@ export default function Dashboard() {
 
               <div className="bg-white rounded-lg shadow p-6">
                 <h3 className="font-semibold mb-4">📊 Répartition par statut</h3>
-                <div className="h-48">
+                <div className="h-48 overflow-y-auto">
                   {statuses.length > 0 ? (
-                    <div className="space-y-2">
+                    <div className="space-y-2 pr-2">
                       {statuses.map(status => {
                         const count = leads.filter(l => l.status === status.name).length
                         const percentage = leads.length > 0 ? (count / leads.length) * 100 : 0

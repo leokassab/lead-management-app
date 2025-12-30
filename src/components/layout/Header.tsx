@@ -8,24 +8,19 @@ export default function Header() {
   const navLinkClass = ({ isActive }: { isActive: boolean }) =>
     `px-3 py-2 rounded-md text-sm font-medium transition-colors ${
       isActive
-        ? 'text-blue-600 bg-blue-50'
-        : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+        ? 'text-cyan-400 bg-white/10'
+        : 'text-gray-300 hover:text-white hover:bg-white/10'
     }`
 
   return (
-    <header className="h-16 bg-white border-b border-gray-200 sticky top-0 z-40">
-      <div className="h-full max-w-7xl mx-auto px-4 flex items-center justify-between">
+    <header className="h-20 bg-[#0f172a] sticky top-0 z-40">
+      <div className="h-full max-w-7xl mx-auto px-6 flex items-center justify-between">
         {/* Logo */}
         <div
           onClick={() => navigate('/dashboard')}
-          className="flex items-center gap-3 cursor-pointer"
+          className="flex items-center cursor-pointer"
         >
-          <div className="w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center">
-            <span className="text-white font-bold text-lg">L</span>
-          </div>
-          <span className="text-xl font-bold text-gray-900 hidden sm:block">
-            Lead Manager
-          </span>
+          <img src="/logo.png" alt="Prospex" className="h-12 w-auto" />
         </div>
 
         {/* Navigation */}
@@ -52,11 +47,11 @@ export default function Header() {
       </div>
 
       {/* Mobile navigation */}
-      <nav className="md:hidden border-t border-gray-200 bg-white px-4 py-2 flex justify-around">
+      <nav className="md:hidden border-t border-gray-700 bg-[#0f172a] px-4 py-2 flex justify-around">
         <NavLink
           to="/dashboard"
           className={({ isActive }) =>
-            `flex flex-col items-center text-xs ${isActive ? 'text-blue-600' : 'text-gray-600'}`
+            `flex flex-col items-center text-xs ${isActive ? 'text-cyan-400' : 'text-gray-400'}`
           }
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -67,7 +62,7 @@ export default function Header() {
         <NavLink
           to="/leads"
           className={({ isActive }) =>
-            `flex flex-col items-center text-xs ${isActive ? 'text-blue-600' : 'text-gray-600'}`
+            `flex flex-col items-center text-xs ${isActive ? 'text-cyan-400' : 'text-gray-400'}`
           }
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -78,7 +73,7 @@ export default function Header() {
         <NavLink
           to="/statistiques"
           className={({ isActive }) =>
-            `flex flex-col items-center text-xs ${isActive ? 'text-blue-600' : 'text-gray-600'}`
+            `flex flex-col items-center text-xs ${isActive ? 'text-cyan-400' : 'text-gray-400'}`
           }
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -89,7 +84,7 @@ export default function Header() {
         <NavLink
           to="/parametres"
           className={({ isActive }) =>
-            `flex flex-col items-center text-xs ${isActive ? 'text-blue-600' : 'text-gray-600'}`
+            `flex flex-col items-center text-xs ${isActive ? 'text-cyan-400' : 'text-gray-400'}`
           }
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
