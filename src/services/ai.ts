@@ -1,34 +1,38 @@
 import { supabase } from '../lib/supabase'
-import type { Lead, Script } from '../types'
+import type { Lead, Script, AIConfig, AIHistoryEntry, LeadAction, ScriptGenerationContext } from '../types'
+import { DEFAULT_AI_CONFIG } from '../types'
 
 // OpenAI API configuration
 const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions'
 
-interface AIConfig {
+interface AIServiceConfig {
   apiKey: string
   model?: string
 }
 
-interface ScoreResult {
+export interface AIAnalysisResult {
   score: number
+  priority: 'cold' | 'warm' | 'hot' | 'urgent'
+  reasoning: string
   conversionProbability: number
   maturityLevel: 'awareness' | 'consideration' | 'decision'
+  recommendedAction: LeadAction
   recommendations: string[]
   objections: { objection: string; response: string }[]
+  confidence: number
 }
 
 interface ScriptResult {
   content: string
   personalizationData: Record<string, string>
+  generationContext: ScriptGenerationContext
 }
 
 // Get OpenAI API key from team settings or localStorage
 async function getApiKey(teamId?: string): Promise<string | null> {
-  // First check localStorage for demo/testing
   const localKey = localStorage.getItem('openai_api_key')
   if (localKey) return localKey
 
-  // Then try to get from team settings
   if (teamId) {
     const { data } = await supabase
       .from('team_settings')
@@ -42,11 +46,38 @@ async function getApiKey(teamId?: string): Promise<string | null> {
   return null
 }
 
+// Get team AI config
+export async function getTeamAIConfig(teamId: string): Promise<AIConfig> {
+  try {
+    const { data } = await supabase
+      .from('teams')
+      .select('ai_config')
+      .eq('id', teamId)
+      .single()
+
+    return data?.ai_config || DEFAULT_AI_CONFIG
+  } catch {
+    return DEFAULT_AI_CONFIG
+  }
+}
+
+// Update team AI config
+export async function updateTeamAIConfig(teamId: string, config: AIConfig): Promise<boolean> {
+  const { error } = await supabase
+    .from('teams')
+    .update({ ai_config: config })
+    .eq('id', teamId)
+
+  return !error
+}
+
 // Call OpenAI API
 async function callOpenAI(
   messages: { role: 'system' | 'user' | 'assistant'; content: string }[],
-  config: AIConfig
-): Promise<string> {
+  config: AIServiceConfig
+): Promise<{ content: string; tokens: number }> {
+  const startTime = Date.now()
+
   const response = await fetch(OPENAI_API_URL, {
     method: 'POST',
     headers: {
@@ -57,7 +88,7 @@ async function callOpenAI(
       model: config.model || 'gpt-4o-mini',
       messages,
       temperature: 0.7,
-      max_tokens: 1500,
+      max_tokens: 2000,
     }),
   })
 
@@ -67,7 +98,12 @@ async function callOpenAI(
   }
 
   const data = await response.json()
-  return data.choices[0]?.message?.content || ''
+  const processingTime = Date.now() - startTime
+
+  return {
+    content: data.choices[0]?.message?.content || '',
+    tokens: data.usage?.total_tokens || 0,
+  }
 }
 
 // Build lead context for AI
@@ -84,17 +120,68 @@ function buildLeadContext(lead: Lead): string {
   if (lead.city || lead.country) parts.push(`Localisation: ${[lead.city, lead.country].filter(Boolean).join(', ')}`)
   if (lead.is_decision_maker) parts.push('Décisionnaire: Oui')
   if (lead.status) parts.push(`Statut actuel: ${lead.status}`)
-  if (lead.priority) parts.push(`Priorité: ${lead.priority}`)
+  if (lead.priority) parts.push(`Priorité actuelle: ${lead.priority}`)
   if (lead.notes) parts.push(`Notes: ${lead.notes}`)
   if (lead.linkedin_url) parts.push(`LinkedIn: ${lead.linkedin_url}`)
   if (lead.website) parts.push(`Site web: ${lead.website}`)
+  if (lead.email) parts.push(`Email: ${lead.email}`)
+  if (lead.phone) parts.push(`Téléphone: ${lead.phone ? 'Oui' : 'Non'}`)
+  if (lead.last_contacted_at) parts.push(`Dernier contact: ${lead.last_contacted_at}`)
 
   return parts.join('\n')
 }
 
-// Score a lead using AI
-export async function scoreLead(lead: Lead, teamId?: string): Promise<ScoreResult> {
+// Log AI analysis to database
+async function logAIAnalysis(
+  leadId: string,
+  analysisType: 'initial_scoring' | 'rescore' | 'action_recommendation' | 'enrichment',
+  inputData: Record<string, unknown>,
+  outputData: Record<string, unknown>,
+  reasoning: string,
+  confidence: number,
+  modelUsed: string,
+  tokensUsed: number,
+  processingTimeMs: number
+): Promise<void> {
+  try {
+    await supabase.from('ai_analysis_log').insert({
+      lead_id: leadId,
+      analysis_type: analysisType,
+      input_data: inputData,
+      output_data: outputData,
+      reasoning,
+      confidence,
+      model_used: modelUsed,
+      tokens_used: tokensUsed,
+      processing_time_ms: processingTimeMs,
+    })
+  } catch (error) {
+    console.error('Error logging AI analysis:', error)
+  }
+}
+
+// Add entry to lead's AI history
+async function addToAIHistory(
+  leadId: string,
+  entry: AIHistoryEntry,
+  currentHistory: AIHistoryEntry[] = []
+): Promise<void> {
+  const newHistory = [...currentHistory, entry].slice(-10) // Keep last 10 entries
+
+  await supabase
+    .from('leads')
+    .update({ ai_history: newHistory })
+    .eq('id', leadId)
+}
+
+// Main function: Analyze a lead with AI
+export async function analyzeNewLead(
+  lead: Lead,
+  teamId: string,
+  isRescore: boolean = false
+): Promise<AIAnalysisResult> {
   const apiKey = await getApiKey(teamId)
+  const startTime = Date.now()
 
   if (!apiKey) {
     throw new Error('Clé API OpenAI non configurée. Allez dans Paramètres > Intégrations.')
@@ -105,10 +192,14 @@ export async function scoreLead(lead: Lead, teamId?: string): Promise<ScoreResul
   const systemPrompt = `Tu es un expert en qualification de leads B2B pour une équipe commerciale française.
 Analyse le lead fourni et retourne un JSON avec:
 - score: nombre de 0 à 100 indiquant la qualité du lead
+- priority: "cold" | "warm" | "hot" | "urgent" basé sur le score et le contexte
+- reasoning: explication détaillée (2-3 phrases) de pourquoi ce score
 - conversionProbability: probabilité de conversion (0-100)
 - maturityLevel: "awareness" | "consideration" | "decision"
+- recommendedAction: la meilleure prochaine action parmi: "call_today", "send_email", "send_whatsapp", "follow_up", "schedule_meeting", "send_proposal"
 - recommendations: tableau de 3-5 recommandations d'actions commerciales
 - objections: tableau de 2-4 objections probables avec leurs réponses
+- confidence: ton niveau de confiance dans cette analyse (0-1)
 
 Critères de scoring:
 - Décisionnaire = +20 points
@@ -119,9 +210,15 @@ Critères de scoring:
 - LinkedIn présent = +5 points
 - Notes qualitatives positives = +10 points
 
+Règles de priorité:
+- score >= 80 = "urgent" ou "hot"
+- score >= 60 = "hot" ou "warm"
+- score >= 40 = "warm"
+- score < 40 = "cold"
+
 Retourne UNIQUEMENT le JSON, sans markdown.`
 
-  const response = await callOpenAI(
+  const { content, tokens } = await callOpenAI(
     [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: `Analyse ce lead:\n\n${leadContext}` },
@@ -129,23 +226,201 @@ Retourne UNIQUEMENT le JSON, sans markdown.`
     { apiKey }
   )
 
+  const processingTime = Date.now() - startTime
+
+  let result: AIAnalysisResult
   try {
-    // Clean potential markdown formatting
-    const cleanJson = response.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-    return JSON.parse(cleanJson)
+    const cleanJson = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+    result = JSON.parse(cleanJson)
   } catch {
     // Return default if parsing fails
-    return {
+    result = {
       score: 50,
+      priority: 'warm',
+      reasoning: 'Analyse automatique non disponible - lead à qualifier manuellement.',
       conversionProbability: 30,
       maturityLevel: 'awareness',
+      recommendedAction: 'call_today',
       recommendations: ['Contacter le lead pour qualifier', 'Identifier le besoin principal'],
       objections: [{ objection: 'Pas le bon moment', response: 'Je comprends. Quand serait le meilleur moment pour en reparler ?' }],
+      confidence: 0.5,
+    }
+  }
+
+  // Log the analysis
+  await logAIAnalysis(
+    lead.id,
+    isRescore ? 'rescore' : 'initial_scoring',
+    { lead: buildLeadContext(lead) },
+    result,
+    result.reasoning,
+    result.confidence,
+    'gpt-4o-mini',
+    tokens,
+    processingTime
+  )
+
+  // Add to history
+  const historyEntry: AIHistoryEntry = {
+    date: new Date().toISOString(),
+    type: 'scoring',
+    score: result.score,
+    priority: result.priority,
+    action: result.recommendedAction,
+    reasoning: result.reasoning,
+  }
+  await addToAIHistory(lead.id, historyEntry, lead.ai_history || [])
+
+  return result
+}
+
+// Apply AI results to lead based on team config
+export async function applyAIResultsToLead(
+  leadId: string,
+  result: AIAnalysisResult,
+  aiConfig: AIConfig
+): Promise<boolean> {
+  const updateData: Record<string, unknown> = {
+    updated_at: new Date().toISOString(),
+  }
+
+  // Always apply scoring (auto_scoring is always true by design)
+  if (aiConfig.auto_scoring) {
+    updateData.ai_score = result.score
+    updateData.priority = result.priority
+    updateData.ai_analyzed = true
+    updateData.ai_analysis_date = new Date().toISOString()
+    updateData.ai_reasoning = result.reasoning
+    updateData.conversion_probability = result.conversionProbability
+    updateData.maturity_level = result.maturityLevel
+    updateData.ai_recommendations = result.recommendations.join('\n')
+    updateData.ai_objections = result.objections
+  }
+
+  // Store recommended action (always)
+  updateData.ai_recommended_action = result.recommendedAction
+
+  // Apply action automatically if configured
+  if (aiConfig.auto_action_recommendation) {
+    updateData.current_action = result.recommendedAction
+    updateData.current_action_date = new Date().toISOString()
+  }
+
+  const { error } = await supabase
+    .from('leads')
+    .update(updateData)
+    .eq('id', leadId)
+
+  return !error
+}
+
+// Convenience function: Analyze and apply in one call
+export async function analyzeAndApplyToLead(
+  lead: Lead,
+  teamId: string,
+  isRescore: boolean = false
+): Promise<AIAnalysisResult> {
+  const result = await analyzeNewLead(lead, teamId, isRescore)
+  const aiConfig = await getTeamAIConfig(teamId)
+  await applyAIResultsToLead(lead.id, result, aiConfig)
+  return result
+}
+
+// Suggest action for a lead (manual trigger)
+export async function suggestAction(
+  lead: Lead,
+  teamId: string
+): Promise<{ action: LeadAction; reason: string }> {
+  const apiKey = await getApiKey(teamId)
+
+  if (!apiKey) {
+    return {
+      action: 'call_today',
+      reason: 'Aucune analyse IA disponible - rappeler pour qualifier',
+    }
+  }
+
+  const leadContext = buildLeadContext(lead)
+
+  const systemPrompt = `Tu es un coach commercial expert. Analyse le lead et suggère la prochaine action optimale.
+Retourne un JSON avec:
+- action: une des valeurs suivantes: "call_today", "send_email", "send_whatsapp", "follow_up", "schedule_meeting", "send_proposal", "waiting_response"
+- reason: explication courte de pourquoi cette action (1-2 phrases)
+
+Retourne UNIQUEMENT le JSON.`
+
+  const { content } = await callOpenAI(
+    [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `Lead:\n${leadContext}\n\nStatut: ${lead.status}\nDernier contact: ${lead.last_contacted_at || 'Jamais'}\nAction actuelle: ${lead.current_action || 'Aucune'}` },
+    ],
+    { apiKey }
+  )
+
+  try {
+    const cleanJson = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+    return JSON.parse(cleanJson)
+  } catch {
+    return {
+      action: 'follow_up',
+      reason: 'Relancer le lead pour maintenir le contact',
     }
   }
 }
 
-// Generate a script for a lead
+// Apply suggested action to lead
+export async function applySuggestedAction(
+  leadId: string,
+  action: LeadAction,
+  reason: string
+): Promise<boolean> {
+  const { error } = await supabase
+    .from('leads')
+    .update({
+      current_action: action,
+      current_action_date: new Date().toISOString(),
+      current_action_note: `IA: ${reason}`,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', leadId)
+
+  return !error
+}
+
+// Get recent activities for a lead (last 5)
+async function getRecentActivities(leadId: string): Promise<string[]> {
+  try {
+    const { data } = await supabase
+      .from('activities')
+      .select('activity_type, description, created_at')
+      .eq('lead_id', leadId)
+      .order('created_at', { ascending: false })
+      .limit(5)
+
+    if (!data || data.length === 0) return []
+
+    return data.map(a => `${a.activity_type}: ${a.description || 'Pas de détails'}`)
+  } catch {
+    return []
+  }
+}
+
+// Build personalization context for script generation
+function buildScriptContext(lead: Lead, recentActivities: string[]): ScriptGenerationContext {
+  const objections = lead.ai_objections?.map(o => o.objection) || []
+
+  return {
+    source: lead.source,
+    campaign: lead.source_campaign || undefined,
+    product_interest: lead.product_interest || undefined,
+    maturity: lead.maturity_level,
+    objections_addressed: objections.length > 0 ? objections : undefined,
+    lead_type: lead.lead_type,
+    recent_activities: recentActivities.length > 0 ? recentActivities : undefined,
+  }
+}
+
+// Generate a PERSONALIZED script for a lead
 export async function generateScript(
   lead: Lead,
   scriptType: 'phone_call' | 'email_intro' | 'email_followup' | 'linkedin_message',
@@ -158,77 +433,141 @@ export async function generateScript(
     throw new Error('Clé API OpenAI non configurée. Allez dans Paramètres > Intégrations.')
   }
 
+  // Fetch recent activities
+  const recentActivities = await getRecentActivities(lead.id)
+  const generationContext = buildScriptContext(lead, recentActivities)
+
   const leadContext = buildLeadContext(lead)
 
-  const scriptPrompts: Record<string, string> = {
-    phone_call: `Génère un script d'appel téléphonique de prospection en français.
-Structure:
-1. Accroche personnalisée (mentionner l'entreprise/poste)
-2. Présentation rapide de la valeur
-3. Question d'ouverture pour qualifier
-4. 2-3 questions de découverte
-5. Proposition de prochaine étape
-6. Gestion des objections communes
+  // Build personalization info for the prompt
+  const personalizationInfo: string[] = []
 
-Le script doit être naturel, pas robotique. Environ 200 mots.`,
-
-    email_intro: `Génère un email de premier contact en français.
-Structure:
-- Objet accrocheur et personnalisé
-- Accroche qui montre que tu connais leur contexte
-- 1-2 phrases sur la valeur apportée
-- Call-to-action clair (proposition de rdv)
-- Signature professionnelle
-
-L'email doit être court (max 150 mots), personnalisé et engageant.`,
-
-    email_followup: `Génère un email de relance en français.
-Contexte: Le lead n'a pas répondu au premier email.
-Structure:
-- Objet de relance subtil
-- Rappel bref du premier contact
-- Nouvelle approche/angle de valeur
-- Question ouverte ou proposition concrète
-- Ton amical mais professionnel
-
-Max 100 mots, direct et efficace.`,
-
-    linkedin_message: `Génère un message LinkedIn de prise de contact en français.
-Structure:
-- Message court (max 300 caractères)
-- Personnalisation basée sur le profil
-- Pas de pitch direct, approche relationnelle
-- Question ou remarque engageante
-
-Ton: professionnel mais décontracté, comme une vraie conversation.`,
+  if (lead.source_campaign) {
+    personalizationInfo.push(`Source: ${lead.source} via campagne "${lead.source_campaign}"`)
+  } else {
+    personalizationInfo.push(`Source: ${lead.source}`)
   }
 
-  const systemPrompt = `Tu es un expert en copywriting commercial B2B français.
+  if (lead.product_interest) {
+    personalizationInfo.push(`Intérêt produit: ${lead.product_interest}`)
+  }
+
+  if (lead.maturity_level) {
+    const maturityLabels: Record<string, string> = {
+      awareness: 'Découverte - connaît peu le sujet',
+      consideration: 'Considération - compare les options',
+      decision: 'Décision - prêt à acheter',
+    }
+    personalizationInfo.push(`Maturité: ${maturityLabels[lead.maturity_level] || lead.maturity_level}`)
+  }
+
+  if (lead.ai_objections && lead.ai_objections.length > 0) {
+    personalizationInfo.push(`Objections probables: ${lead.ai_objections.map(o => o.objection).join(', ')}`)
+  }
+
+  if (recentActivities.length > 0) {
+    personalizationInfo.push(`Dernières interactions:\n${recentActivities.join('\n')}`)
+  }
+
+  if (lead.lead_type) {
+    personalizationInfo.push(`Type: ${lead.lead_type}`)
+  }
+
+  const personalizationBlock = personalizationInfo.length > 0
+    ? `\n\n=== CONTEXTE DE PERSONNALISATION ===\n${personalizationInfo.join('\n')}\n===================================`
+    : ''
+
+  const scriptPrompts: Record<string, string> = {
+    phone_call: `Génère un script d'appel téléphonique de prospection ULTRA-PERSONNALISÉ en français.
+
+IMPORTANT: Ce script doit être spécifique à CE lead, pas générique.
+${lead.source_campaign ? `Mentionne la campagne "${lead.source_campaign}" naturellement.` : ''}
+${lead.product_interest ? `Centre la conversation sur "${lead.product_interest}".` : ''}
+${lead.ai_objections?.length ? `Prépare des réponses aux objections identifiées.` : ''}
+
+Structure:
+1. Accroche personnalisée mentionnant COMMENT tu as eu son contact
+2. Présentation rapide de la valeur liée à son intérêt
+3. Question d'ouverture pour qualifier son besoin précis
+4. 2-3 questions de découverte adaptées à son profil
+5. Proposition de prochaine étape concrète
+6. Réponses aux objections probables
+
+Le script doit être naturel et montrer que tu CONNAIS ce lead.`,
+
+    email_intro: `Génère un email de premier contact PERSONNALISÉ en français.
+
+IMPORTANT: L'email doit montrer que tu sais D'OÙ vient ce lead.
+${lead.source_campaign ? `Réfère-toi à la campagne "${lead.source_campaign}".` : ''}
+${lead.product_interest ? `Parle de "${lead.product_interest}" spécifiquement.` : ''}
+
+Structure:
+- Objet accrocheur mentionnant son intérêt/contexte
+- Accroche qui montre que tu sais comment il t'a trouvé
+- 1-2 phrases sur la valeur liée à son besoin précis
+- Call-to-action clair
+- Signature pro
+
+Court (max 150 mots), personnalisé, engageant.`,
+
+    email_followup: `Génère un email de relance PERSONNALISÉ en français.
+
+Contexte: Le lead n'a pas répondu. Il vient de ${lead.source}${lead.source_campaign ? ` (${lead.source_campaign})` : ''}.
+${lead.product_interest ? `Son intérêt initial: "${lead.product_interest}".` : ''}
+
+Structure:
+- Objet de relance qui rappelle le contexte
+- Rappel du premier contact avec un nouvel angle
+- Nouvelle proposition de valeur adaptée
+- Question ouverte ou offre concrète
+
+Max 100 mots, montrant que tu as compris son besoin.`,
+
+    linkedin_message: `Génère un message LinkedIn PERSONNALISÉ en français.
+
+${lead.source === 'web_form' || lead.source_campaign ? `Ce lead a montré de l'intérêt via ${lead.source_campaign || lead.source}.` : ''}
+${lead.product_interest ? `Son intérêt: "${lead.product_interest}".` : ''}
+
+Structure:
+- Message court (max 300 caractères)
+- Référence à son contexte/intérêt
+- Approche relationnelle, pas commerciale
+- Question engageante
+
+Ton naturel comme une vraie conversation.`,
+  }
+
+  const systemPrompt = `Tu es un expert en copywriting commercial B2B/B2C français.
 ${scriptPrompts[scriptType]}
 
 ${additionalContext ? `Contexte additionnel: ${additionalContext}` : ''}
 
 Retourne un JSON avec:
-- content: le script/email complet
-- personalizationData: objet avec les éléments personnalisés utilisés (nom, entreprise, etc.)
+- content: le script/email complet et PERSONNALISÉ
+- personalizationData: objet avec les éléments personnalisés utilisés (nom, entreprise, source, campagne, intérêt, etc.)
 
 Retourne UNIQUEMENT le JSON, sans markdown.`
 
-  const response = await callOpenAI(
+  const { content } = await callOpenAI(
     [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: `Génère pour ce lead:\n\n${leadContext}` },
+      { role: 'user', content: `Génère un script PERSONNALISÉ pour ce lead:\n\n${leadContext}${personalizationBlock}` },
     ],
     { apiKey }
   )
 
   try {
-    const cleanJson = response.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-    return JSON.parse(cleanJson)
+    const cleanJson = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+    const result = JSON.parse(cleanJson)
+    return {
+      ...result,
+      generationContext,
+    }
   } catch {
     return {
-      content: response,
+      content: content,
       personalizationData: {},
+      generationContext,
     }
   }
 }
@@ -238,7 +577,8 @@ export async function saveScript(
   leadId: string,
   scriptType: Script['script_type'],
   content: string,
-  personalizationData?: Record<string, unknown>
+  personalizationData?: Record<string, unknown>,
+  generationContext?: ScriptGenerationContext
 ): Promise<Script | null> {
   const { data, error } = await supabase
     .from('scripts')
@@ -247,6 +587,7 @@ export async function saveScript(
       script_type: scriptType,
       generated_content: content,
       personalization_data: personalizationData || {},
+      generation_context: generationContext || {},
       generated_at: new Date().toISOString(),
       used: false,
     })
@@ -259,27 +600,6 @@ export async function saveScript(
   }
 
   return data
-}
-
-// Update lead with AI analysis
-export async function updateLeadWithAIAnalysis(
-  leadId: string,
-  scoreResult: ScoreResult
-): Promise<boolean> {
-  const { error } = await supabase
-    .from('leads')
-    .update({
-      ai_score: scoreResult.score,
-      conversion_probability: scoreResult.conversionProbability,
-      maturity_level: scoreResult.maturityLevel,
-      ai_recommendations: scoreResult.recommendations.join('\n'),
-      ai_objections: scoreResult.objections,
-      ai_analyzed: true,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', leadId)
-
-  return !error
 }
 
 // Get previously generated scripts for a lead
@@ -298,56 +618,102 @@ export async function getLeadScripts(leadId: string): Promise<Script[]> {
   return data || []
 }
 
-// Mark script as used
-export async function markScriptAsUsed(scriptId: string): Promise<boolean> {
+// Mark script as used with optional rating
+export async function markScriptAsUsed(
+  scriptId: string,
+  rating?: number
+): Promise<boolean> {
+  const updateData: Record<string, unknown> = {
+    used: true,
+    used_at: new Date().toISOString(),
+  }
+
+  if (rating && rating >= 1 && rating <= 5) {
+    updateData.effectiveness_rating = rating
+  }
+
   const { error } = await supabase
     .from('scripts')
-    .update({ used: true })
+    .update(updateData)
     .eq('id', scriptId)
 
   return !error
 }
 
-// Analyze lead and suggest next action
-export async function suggestNextAction(
+// Rate a script (can be done separately from marking as used)
+export async function rateScript(
+  scriptId: string,
+  rating: number
+): Promise<boolean> {
+  if (rating < 1 || rating > 5) return false
+
+  const { error } = await supabase
+    .from('scripts')
+    .update({ effectiveness_rating: rating })
+    .eq('id', scriptId)
+
+  return !error
+}
+
+// Auto-generate script for new lead (when auto_script_generation is enabled)
+export async function autoGenerateScriptForLead(
   lead: Lead,
-  teamId?: string
-): Promise<{ action: string; reason: string; script?: string }> {
-  const apiKey = await getApiKey(teamId)
-
-  if (!apiKey) {
-    // Return default suggestion without AI
-    return {
-      action: 'call_back',
-      reason: 'Aucune analyse IA disponible - rappeler pour qualifier',
-    }
-  }
-
-  const leadContext = buildLeadContext(lead)
-
-  const systemPrompt = `Tu es un coach commercial expert. Analyse le lead et suggère la prochaine action optimale.
-Retourne un JSON avec:
-- action: "call_back" | "send_proposal" | "follow_up" | "meeting"
-- reason: explication courte de pourquoi cette action
-- script: phrase d'accroche suggérée pour cette action (optionnel)
-
-Retourne UNIQUEMENT le JSON.`
-
-  const response = await callOpenAI(
-    [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: `Lead:\n${leadContext}\n\nStatut: ${lead.status}\nDernier contact: ${lead.last_contacted_at || 'Jamais'}` },
-    ],
-    { apiKey }
-  )
-
+  teamId: string
+): Promise<Script | null> {
   try {
-    const cleanJson = response.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-    return JSON.parse(cleanJson)
-  } catch {
-    return {
-      action: 'follow_up',
-      reason: 'Relancer le lead pour maintenir le contact',
-    }
+    const result = await generateScript(lead, 'phone_call', teamId)
+    const script = await saveScript(
+      lead.id,
+      'phone_call',
+      result.content,
+      result.personalizationData,
+      result.generationContext
+    )
+    return script
+  } catch (error) {
+    console.error('Error auto-generating script:', error)
+    return null
   }
+}
+
+// Legacy function for backwards compatibility
+export async function scoreLead(lead: Lead, teamId?: string) {
+  if (!teamId) {
+    throw new Error('Team ID required')
+  }
+  return analyzeNewLead(lead, teamId)
+}
+
+// Legacy function for backwards compatibility
+export async function updateLeadWithAIAnalysis(
+  leadId: string,
+  scoreResult: AIAnalysisResult
+): Promise<boolean> {
+  const { error } = await supabase
+    .from('leads')
+    .update({
+      ai_score: scoreResult.score,
+      conversion_probability: scoreResult.conversionProbability,
+      maturity_level: scoreResult.maturityLevel,
+      ai_recommendations: scoreResult.recommendations.join('\n'),
+      ai_objections: scoreResult.objections,
+      ai_analyzed: true,
+      ai_reasoning: scoreResult.reasoning,
+      ai_analysis_date: new Date().toISOString(),
+      priority: scoreResult.priority,
+      ai_recommended_action: scoreResult.recommendedAction,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', leadId)
+
+  return !error
+}
+
+// Legacy function
+export async function suggestNextAction(lead: Lead, teamId?: string) {
+  if (!teamId) {
+    return { action: 'call_back', reason: 'Team ID required' }
+  }
+  const result = await suggestAction(lead, teamId)
+  return { ...result, script: undefined }
 }

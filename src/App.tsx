@@ -1,9 +1,11 @@
 import { useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { useAuthStore } from './stores/authStore'
+import { Layout } from './components/layout'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
 import Dashboard from './pages/Dashboard'
+import Queue from './pages/Queue'
 import Leads from './pages/Leads'
 import LeadDetail from './pages/LeadDetail'
 import Statistics from './pages/Statistics'
@@ -34,7 +36,19 @@ function App() {
           path="/dashboard"
           element={
             <ProtectedRoute>
-              <Dashboard />
+              <Layout>
+                <Dashboard />
+              </Layout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/queue"
+          element={
+            <ProtectedRoute>
+              <Layout>
+                <Queue />
+              </Layout>
             </ProtectedRoute>
           }
         />
@@ -42,7 +56,9 @@ function App() {
           path="/leads"
           element={
             <ProtectedRoute>
-              <Leads />
+              <Layout>
+                <Leads />
+              </Layout>
             </ProtectedRoute>
           }
         />
@@ -50,7 +66,21 @@ function App() {
           path="/leads/:id"
           element={
             <ProtectedRoute>
-              <LeadDetail />
+              <Layout>
+                <LeadDetail />
+              </Layout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/calendrier"
+          element={
+            <ProtectedRoute>
+              <Layout>
+                <div className="text-center py-12 text-gray-500">
+                  Page Calendrier - À venir
+                </div>
+              </Layout>
             </ProtectedRoute>
           }
         />
@@ -58,7 +88,9 @@ function App() {
           path="/statistiques"
           element={
             <ProtectedRoute>
-              <Statistics />
+              <Layout>
+                <Statistics />
+              </Layout>
             </ProtectedRoute>
           }
         />
@@ -66,7 +98,9 @@ function App() {
           path="/parametres"
           element={
             <ProtectedRoute>
-              <Settings />
+              <Layout>
+                <Settings />
+              </Layout>
             </ProtectedRoute>
           }
         />

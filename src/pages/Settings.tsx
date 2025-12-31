@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
-import { Layout } from '../components/layout'
 import { Button, Avatar, Input, Select, Modal, Badge } from '../components/ui'
 import { useAuthStore } from '../stores/authStore'
 import { supabase } from '../lib/supabase'
-import type { CustomStatus, User, AssignmentRule, Team } from '../types'
+import { getTeamAIConfig, updateTeamAIConfig } from '../services/ai'
+import type { CustomStatus, User, AssignmentRule, Team, AIConfig } from '../types'
+import { DEFAULT_AI_CONFIG } from '../types'
 
-type Tab = 'profile' | 'team' | 'statuses' | 'rules' | 'integrations' | 'billing'
+type Tab = 'profile' | 'team' | 'statuses' | 'rules' | 'ai' | 'integrations' | 'billing'
 
 const ROLE_OPTIONS = [
   { value: 'sales', label: 'Commercial' },
@@ -72,6 +73,10 @@ export default function Settings() {
   const [openaiKey, setOpenaiKey] = useState('')
   const [showApiKey, setShowApiKey] = useState(false)
 
+  // AI Config
+  const [aiConfig, setAIConfig] = useState<AIConfig>(DEFAULT_AI_CONFIG)
+  const [aiConfigSaving, setAIConfigSaving] = useState(false)
+
   useEffect(() => {
     if (profile) {
       setProfileForm({
@@ -117,6 +122,10 @@ export default function Settings() {
       if (statusesRes.data) setCustomStatuses(statusesRes.data)
       if (rulesRes.data) setAssignmentRules(rulesRes.data)
       if (teamRes.data) setTeam(teamRes.data)
+
+      // Fetch AI config
+      const config = await getTeamAIConfig(profile.team_id)
+      setAIConfig(config)
     } catch (error) {
       console.error('Error fetching data:', error)
     } finally {
@@ -366,6 +375,7 @@ export default function Settings() {
     { id: 'team' as Tab, label: '👥 Équipe', show: profile?.role === 'admin' || profile?.role === 'manager' },
     { id: 'statuses' as Tab, label: '🏷️ Statuts', show: profile?.role === 'admin' || profile?.role === 'manager' },
     { id: 'rules' as Tab, label: '⚙️ Règles', show: profile?.role === 'admin' || profile?.role === 'manager' },
+    { id: 'ai' as Tab, label: '🤖 IA', show: profile?.role === 'admin' || profile?.role === 'manager' },
     { id: 'integrations' as Tab, label: '🔌 Intégrations', show: profile?.role === 'admin' },
     { id: 'billing' as Tab, label: '💳 Abonnement', show: profile?.role === 'admin' },
   ]
@@ -384,7 +394,7 @@ export default function Settings() {
   }
 
   return (
-    <Layout>
+    <>
       <div className="space-y-6">
         <h1 className="text-2xl font-bold text-gray-900">Paramètres</h1>
 
@@ -680,6 +690,160 @@ export default function Settings() {
                     ))}
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* AI Configuration Tab */}
+            {activeTab === 'ai' && (
+              <div className="space-y-6">
+                {/* AI Header */}
+                <div className="bg-gradient-to-r from-indigo-600 to-purple-600 rounded-lg shadow p-6 text-white">
+                  <h2 className="text-xl font-bold flex items-center gap-2">
+                    <span className="text-2xl">🤖</span>
+                    Configuration IA
+                  </h2>
+                  <p className="text-indigo-100 mt-2">
+                    Configurez le comportement de l'intelligence artificielle pour votre équipe
+                  </p>
+                </div>
+
+                {/* Scoring Automatique */}
+                <div className="bg-white rounded-lg shadow p-6">
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xl">🎯</span>
+                        <h3 className="font-semibold">Scoring automatique</h3>
+                        <Badge variant="success">Toujours actif</Badge>
+                      </div>
+                      <p className="text-sm text-gray-500 mt-1">
+                        Chaque nouveau lead est automatiquement analysé et scoré par l'IA
+                      </p>
+                    </div>
+                    <div className="relative">
+                      <button
+                        disabled
+                        className="relative inline-flex h-6 w-11 items-center rounded-full bg-indigo-600 cursor-not-allowed opacity-75"
+                      >
+                        <span className="inline-block h-4 w-4 transform rounded-full bg-white translate-x-6" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Action recommandée automatique */}
+                <div className="bg-white rounded-lg shadow p-6">
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xl">💡</span>
+                        <h3 className="font-semibold">Action recommandée automatique</h3>
+                      </div>
+                      <p className="text-sm text-gray-500 mt-1">
+                        L'IA définit automatiquement la prochaine action à effectuer sur chaque lead
+                      </p>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        const newConfig = { ...aiConfig, auto_action_recommendation: !aiConfig.auto_action_recommendation }
+                        setAIConfig(newConfig)
+                        setAIConfigSaving(true)
+                        await updateTeamAIConfig(profile?.team_id || '', newConfig)
+                        setAIConfigSaving(false)
+                      }}
+                      disabled={aiConfigSaving}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                        aiConfig.auto_action_recommendation ? 'bg-indigo-600' : 'bg-gray-200'
+                      }`}
+                    >
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        aiConfig.auto_action_recommendation ? 'translate-x-6' : 'translate-x-1'
+                      }`} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Enrichissement automatique */}
+                <div className="bg-white rounded-lg shadow p-6">
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xl">🔍</span>
+                        <h3 className="font-semibold">Enrichissement automatique</h3>
+                        <Badge variant="warning">Bientôt</Badge>
+                      </div>
+                      <p className="text-sm text-gray-500 mt-1">
+                        L'IA recherche automatiquement des informations supplémentaires sur vos leads
+                      </p>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        const newConfig = { ...aiConfig, auto_enrichment: !aiConfig.auto_enrichment }
+                        setAIConfig(newConfig)
+                        setAIConfigSaving(true)
+                        await updateTeamAIConfig(profile?.team_id || '', newConfig)
+                        setAIConfigSaving(false)
+                      }}
+                      disabled={aiConfigSaving}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                        aiConfig.auto_enrichment ? 'bg-indigo-600' : 'bg-gray-200'
+                      }`}
+                    >
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        aiConfig.auto_enrichment ? 'translate-x-6' : 'translate-x-1'
+                      }`} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Génération de scripts automatique */}
+                <div className="bg-white rounded-lg shadow p-6">
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xl">📝</span>
+                        <h3 className="font-semibold">Génération de scripts automatique</h3>
+                        <Badge variant="warning">Bientôt</Badge>
+                      </div>
+                      <p className="text-sm text-gray-500 mt-1">
+                        L'IA génère automatiquement des scripts d'appel et d'email personnalisés
+                      </p>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        const newConfig = { ...aiConfig, auto_script_generation: !aiConfig.auto_script_generation }
+                        setAIConfig(newConfig)
+                        setAIConfigSaving(true)
+                        await updateTeamAIConfig(profile?.team_id || '', newConfig)
+                        setAIConfigSaving(false)
+                      }}
+                      disabled={aiConfigSaving}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                        aiConfig.auto_script_generation ? 'bg-indigo-600' : 'bg-gray-200'
+                      }`}
+                    >
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        aiConfig.auto_script_generation ? 'translate-x-6' : 'translate-x-1'
+                      }`} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Info */}
+                <div className="p-4 bg-blue-50 rounded-lg border border-blue-200">
+                  <div className="flex items-start gap-3">
+                    <span className="text-xl">💡</span>
+                    <div>
+                      <p className="text-sm text-blue-800">
+                        <strong>Note :</strong> Le scoring automatique est toujours actif pour assurer une qualification optimale de vos leads.
+                        Les autres fonctionnalités peuvent être activées selon vos besoins.
+                      </p>
+                      <p className="text-sm text-blue-600 mt-2">
+                        Assurez-vous d'avoir configuré votre clé API OpenAI dans l'onglet Intégrations.
+                      </p>
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
 
@@ -1056,6 +1220,6 @@ export default function Settings() {
           </div>
         </div>
       </Modal>
-    </Layout>
+    </>
   )
 }

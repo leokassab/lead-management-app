@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Layout } from '../components/layout'
 import { Badge } from '../components/ui'
 import { useLeads, useDashboardStats } from '../hooks/useLeads'
 import { formatDateTime } from '../utils/formatters'
@@ -43,8 +42,7 @@ export default function Dashboard() {
   }
 
   return (
-    <Layout>
-      <div className="space-y-6">
+    <div className="space-y-6">
         {/* Header */}
         <div className="flex justify-between items-center">
           <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
@@ -222,7 +220,6 @@ export default function Dashboard() {
             </div>
           </>
         )}
-      </div>
-    </Layout>
+    </div>
   )
 }

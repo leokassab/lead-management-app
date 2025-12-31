@@ -1,9 +1,46 @@
 import { NavLink, useNavigate } from 'react-router-dom'
+import { useLeads } from '../../hooks/useLeads'
 import NotificationDropdown from './NotificationDropdown'
 import UserMenu from './UserMenu'
 
 export default function Header() {
   const navigate = useNavigate()
+  const { leads } = useLeads()
+
+  // Calculate leads requiring action (queue count)
+  const getQueueCount = () => {
+    const now = new Date()
+
+    return leads.filter(lead => {
+      // Exclude closed leads
+      const status = lead.status?.toLowerCase() || ''
+      if (status.includes('gagné') || status.includes('perdu') ||
+          status.includes('won') || status.includes('lost')) {
+        return false
+      }
+
+      // Exclude waiting/do not contact
+      if (lead.current_action === 'waiting_response' ||
+          lead.current_action === 'do_not_contact') {
+        return false
+      }
+
+      // Has action scheduled for today or past
+      if (lead.current_action_date) {
+        const actionDate = new Date(lead.current_action_date)
+        if (actionDate <= now) return true
+      }
+
+      // Has an active action (not none)
+      if (lead.current_action && lead.current_action !== 'none') {
+        return true
+      }
+
+      return false
+    }).length
+  }
+
+  const queueCount = getQueueCount()
 
   const navLinkClass = ({ isActive }: { isActive: boolean }) =>
     `px-3 py-2 rounded-md text-sm font-medium transition-colors ${
@@ -28,8 +65,21 @@ export default function Header() {
           <NavLink to="/dashboard" className={navLinkClass}>
             Dashboard
           </NavLink>
+          <NavLink to="/queue" className={navLinkClass}>
+            <span className="flex items-center gap-2">
+              À traiter
+              {queueCount > 0 && (
+                <span className="bg-red-500 text-white text-xs rounded-full min-w-[20px] h-5 px-1.5 flex items-center justify-center font-medium">
+                  {queueCount > 99 ? '99+' : queueCount}
+                </span>
+              )}
+            </span>
+          </NavLink>
           <NavLink to="/leads" className={navLinkClass}>
             Leads
+          </NavLink>
+          <NavLink to="/calendrier" className={navLinkClass}>
+            Calendrier
           </NavLink>
           <NavLink to="/statistiques" className={navLinkClass}>
             Statistiques
@@ -60,6 +110,24 @@ export default function Header() {
           <span>Dashboard</span>
         </NavLink>
         <NavLink
+          to="/queue"
+          className={({ isActive }) =>
+            `flex flex-col items-center text-xs relative ${isActive ? 'text-cyan-400' : 'text-gray-400'}`
+          }
+        >
+          <div className="relative">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+            </svg>
+            {queueCount > 0 && (
+              <span className="absolute -top-1 -right-2 bg-red-500 text-white text-[10px] rounded-full min-w-[14px] h-3.5 px-1 flex items-center justify-center">
+                {queueCount > 9 ? '9+' : queueCount}
+              </span>
+            )}
+          </div>
+          <span>À traiter</span>
+        </NavLink>
+        <NavLink
           to="/leads"
           className={({ isActive }) =>
             `flex flex-col items-center text-xs ${isActive ? 'text-cyan-400' : 'text-gray-400'}`
@@ -71,6 +139,17 @@ export default function Header() {
           <span>Leads</span>
         </NavLink>
         <NavLink
+          to="/calendrier"
+          className={({ isActive }) =>
+            `flex flex-col items-center text-xs ${isActive ? 'text-cyan-400' : 'text-gray-400'}`
+          }
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+          </svg>
+          <span>Calendrier</span>
+        </NavLink>
+        <NavLink
           to="/statistiques"
           className={({ isActive }) =>
             `flex flex-col items-center text-xs ${isActive ? 'text-cyan-400' : 'text-gray-400'}`
@@ -80,18 +159,6 @@ export default function Header() {
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
           </svg>
           <span>Stats</span>
-        </NavLink>
-        <NavLink
-          to="/parametres"
-          className={({ isActive }) =>
-            `flex flex-col items-center text-xs ${isActive ? 'text-cyan-400' : 'text-gray-400'}`
-          }
-        >
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-          </svg>
-          <span>Paramètres</span>
         </NavLink>
       </nav>
     </header>

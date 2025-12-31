@@ -1,12 +1,14 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Layout } from '../components/layout'
 import { Button, Badge, Avatar, Modal, Input, Select } from '../components/ui'
 import AIPanel from '../components/leads/AIPanel'
+import { LostReasonModal } from '../components/leads'
 import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../stores/authStore'
-import { formatDateTime } from '../utils/formatters'
+import { formatDateTime, formatDate } from '../utils/formatters'
 import { getPriorityLabel, getNextActionLabel } from '../utils/helpers'
+import { isLostStatus } from '../hooks/useLostReasons'
+import { enrichAndSaveLead, getEnrichmentSummary } from '../services/enrichmentService'
 import type { Lead, CustomStatus, Activity, User } from '../types'
 
 export default function LeadDetail() {
@@ -29,8 +31,15 @@ export default function LeadDetail() {
   const [nextAction, setNextAction] = useState('')
   const [nextActionDate, setNextActionDate] = useState('')
 
+  // Lost reason modal
+  const [showLostModal, setShowLostModal] = useState(false)
+  const [pendingLostStatus, setPendingLostStatus] = useState('')
+
   // Active tab
   const [activeTab, setActiveTab] = useState<'info' | 'ai'>('info')
+
+  // Enrichment
+  const [enriching, setEnriching] = useState(false)
 
   useEffect(() => {
     if (id && profile?.team_id) {
@@ -96,27 +105,71 @@ export default function LeadDetail() {
   const handleStatusChange = async (newStatus: string) => {
     if (!lead) return
 
+    // Check if the new status is a "lost" status
+    if (isLostStatus(newStatus)) {
+      setPendingLostStatus(newStatus)
+      setShowLostModal(true)
+      return
+    }
+
+    await updateLeadStatus(newStatus)
+  }
+
+  const updateLeadStatus = async (newStatus: string, lostReason?: string, lostReasonDetails?: string) => {
+    if (!lead) return
+
     try {
+      const updateData: Record<string, unknown> = {
+        status: newStatus,
+        updated_at: new Date().toISOString(),
+      }
+
+      // Add lost-related fields if this is a lost status
+      if (lostReason) {
+        updateData.lost_reason = lostReason
+        updateData.lost_reason_details = lostReasonDetails || null
+        updateData.lost_at = new Date().toISOString()
+      }
+
       const { error } = await supabase
         .from('leads')
-        .update({ status: newStatus, updated_at: new Date().toISOString() })
+        .update(updateData)
         .eq('id', lead.id)
 
       if (error) throw error
 
       // Add activity
+      let description = `Statut changé en "${newStatus}"`
+      if (lostReason) {
+        description += ` - Raison: ${lostReason}`
+      }
+
       await supabase.from('activities').insert({
         lead_id: lead.id,
         user_id: profile?.id,
         activity_type: 'status_change',
-        description: `Statut changé en "${newStatus}"`,
+        description,
       })
 
-      setLead({ ...lead, status: newStatus })
+      setLead({
+        ...lead,
+        status: newStatus,
+        ...(lostReason ? {
+          lost_reason: lostReason,
+          lost_reason_details: lostReasonDetails,
+          lost_at: new Date().toISOString(),
+        } : {}),
+      })
       fetchData()
     } catch (error) {
       console.error('Error updating status:', error)
     }
+  }
+
+  const handleLostConfirm = async (reason: string, details?: string) => {
+    await updateLeadStatus(pendingLostStatus, reason, details)
+    setShowLostModal(false)
+    setPendingLostStatus('')
   }
 
   const handleAddComment = async () => {
@@ -208,6 +261,23 @@ export default function LeadDetail() {
     }
   }
 
+  const handleEnrichLead = async () => {
+    if (!lead) return
+
+    setEnriching(true)
+    try {
+      const result = await enrichAndSaveLead(lead.id, lead)
+      if (result) {
+        setLead({ ...lead, ...result })
+        fetchData()
+      }
+    } catch (error) {
+      console.error('Error enriching lead:', error)
+    } finally {
+      setEnriching(false)
+    }
+  }
+
   const getStatusColor = (statusName: string) => {
     const status = statuses.find(s => s.name === statusName)
     return status?.color || '#9CA3AF'
@@ -229,30 +299,26 @@ export default function LeadDetail() {
 
   if (loading) {
     return (
-      <Layout>
-        <div className="flex items-center justify-center py-12">
-          <div className="text-gray-500">Chargement...</div>
-        </div>
-      </Layout>
+      <div className="flex items-center justify-center py-12">
+        <div className="text-gray-500">Chargement...</div>
+      </div>
     )
   }
 
   if (!lead) {
     return (
-      <Layout>
-        <div className="text-center py-12">
-          <div className="text-4xl mb-4">🔍</div>
-          <h2 className="text-xl font-semibold text-gray-900">Lead non trouvé</h2>
-          <Button className="mt-4" onClick={() => navigate('/leads')}>
-            Retour aux leads
-          </Button>
-        </div>
-      </Layout>
+      <div className="text-center py-12">
+        <div className="text-4xl mb-4">🔍</div>
+        <h2 className="text-xl font-semibold text-gray-900">Lead non trouvé</h2>
+        <Button className="mt-4" onClick={() => navigate('/leads')}>
+          Retour aux leads
+        </Button>
+      </div>
     )
   }
 
   return (
-    <Layout>
+    <>
       {/* Header */}
       <div className="bg-white border-b -mx-4 -mt-6 px-6 py-4 mb-6">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
@@ -294,6 +360,13 @@ export default function LeadDetail() {
             <Badge color={getStatusColor(lead.priority)} className="text-sm px-3 py-1">
               {getPriorityLabel(lead.priority)}
             </Badge>
+
+            {lead.lost_reason && (
+              <div className="flex items-center gap-2 px-3 py-1.5 bg-red-100 text-red-800 rounded-lg text-sm font-medium">
+                <span>❌</span>
+                <span>{lead.lost_reason}</span>
+              </div>
+            )}
 
             <select
               value={lead.status}
@@ -348,10 +421,110 @@ export default function LeadDetail() {
             <>
           {/* Informations */}
           <section className="bg-white rounded-lg shadow p-6">
-            <h2 className="text-lg font-semibold mb-4">📋 Informations</h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold">📋 Informations</h2>
+              {!lead.enriched_at && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleEnrichLead}
+                  disabled={enriching}
+                >
+                  {enriching ? '⏳ Enrichissement...' : '🔍 Enrichir ce lead'}
+                </Button>
+              )}
+            </div>
             <div className="grid grid-cols-2 gap-4">
-              <InfoItem icon="📧" label="Email" value={lead.email} />
-              <InfoItem icon="📞" label="Téléphone" value={lead.phone} />
+              {/* Email with enrichment status */}
+              <div className="flex items-start gap-2">
+                <span>📧</span>
+                <div className="flex-1">
+                  <div className="text-sm text-gray-500">Email</div>
+                  {lead.email ? (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-gray-900">{lead.email}</span>
+                      {lead.email_validated !== undefined ? (
+                        <>
+                          {lead.email_validated ? (
+                            <span className="text-green-600" title="Email validé">✅</span>
+                          ) : (
+                            <span className="text-red-600" title="Email invalide">⚠️</span>
+                          )}
+                          {lead.email_type && (
+                            <Badge className={`text-xs ${
+                              lead.email_type === 'professional' ? 'bg-blue-100 text-blue-700' :
+                              lead.email_type === 'personal' ? 'bg-gray-100 text-gray-700' :
+                              lead.email_type === 'disposable' ? 'bg-red-100 text-red-700' :
+                              'bg-gray-100 text-gray-500'
+                            }`}>
+                              {lead.email_type === 'professional' ? 'Pro' :
+                               lead.email_type === 'personal' ? 'Perso' :
+                               lead.email_type === 'disposable' ? 'Jetable' : '?'}
+                            </Badge>
+                          )}
+                        </>
+                      ) : (
+                        <button
+                          onClick={handleEnrichLead}
+                          disabled={enriching}
+                          className="text-gray-400 hover:text-blue-600"
+                          title="Vérifier cet email"
+                        >
+                          🔍
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-gray-400">-</div>
+                  )}
+                </div>
+              </div>
+
+              {/* Phone with enrichment status */}
+              <div className="flex items-start gap-2">
+                <span>📞</span>
+                <div className="flex-1">
+                  <div className="text-sm text-gray-500">Téléphone</div>
+                  {lead.phone ? (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-gray-900">{lead.phone}</span>
+                      {lead.phone_validated !== undefined ? (
+                        <>
+                          {lead.phone_validated ? (
+                            <span className="text-green-600" title="Téléphone validé">✅</span>
+                          ) : (
+                            <span className="text-red-600" title="Téléphone invalide">⚠️</span>
+                          )}
+                          {lead.phone_type && (
+                            <Badge className={`text-xs ${
+                              lead.phone_type === 'mobile' ? 'bg-green-100 text-green-700' :
+                              lead.phone_type === 'landline' ? 'bg-blue-100 text-blue-700' :
+                              lead.phone_type === 'voip' ? 'bg-purple-100 text-purple-700' :
+                              'bg-gray-100 text-gray-500'
+                            }`}>
+                              {lead.phone_type === 'mobile' ? 'Mobile' :
+                               lead.phone_type === 'landline' ? 'Fixe' :
+                               lead.phone_type === 'voip' ? 'VoIP' : '?'}
+                            </Badge>
+                          )}
+                        </>
+                      ) : (
+                        <button
+                          onClick={handleEnrichLead}
+                          disabled={enriching}
+                          className="text-gray-400 hover:text-blue-600"
+                          title="Vérifier ce téléphone"
+                        >
+                          🔍
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-gray-400">-</div>
+                  )}
+                </div>
+              </div>
+
               <InfoItem icon="💼" label="Poste" value={lead.job_title} />
               <InfoItem icon="🏢" label="Entreprise" value={lead.company_name} />
               <InfoItem icon="🔗" label="LinkedIn" value={lead.linkedin_url} isLink />
@@ -363,6 +536,13 @@ export default function LeadDetail() {
               <InfoItem icon="✅" label="Décisionnaire" value={lead.is_decision_maker ? 'Oui' : 'Non'} />
               <InfoItem icon="📥" label="Source" value={lead.source} />
             </div>
+
+            {/* Enrichment date */}
+            {lead.enriched_at && (
+              <div className="mt-4 pt-4 border-t text-sm text-gray-500">
+                🔍 Enrichi le {formatDate(lead.enriched_at)}
+              </div>
+            )}
           </section>
 
           {/* Historique & Commentaires */}
@@ -494,6 +674,31 @@ export default function LeadDetail() {
             )}
           </section>
 
+          {/* Lost Info (if lead is lost) */}
+          {lead.lost_reason && (
+            <section className="bg-red-50 rounded-lg shadow p-6 border border-red-200">
+              <h2 className="text-lg font-semibold mb-4 text-red-800">❌ Lead perdu</h2>
+              <div className="space-y-3">
+                <div>
+                  <div className="text-sm text-red-600 font-medium">Raison</div>
+                  <div className="text-red-900 mt-1">{lead.lost_reason}</div>
+                </div>
+                {lead.lost_reason_details && (
+                  <div>
+                    <div className="text-sm text-red-600 font-medium">Détails</div>
+                    <div className="text-red-800 mt-1 text-sm">{lead.lost_reason_details}</div>
+                  </div>
+                )}
+                {lead.lost_at && (
+                  <div>
+                    <div className="text-sm text-red-600 font-medium">Date de perte</div>
+                    <div className="text-red-800 mt-1 text-sm">{formatDate(lead.lost_at)}</div>
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
           {/* Notes */}
           <section className="bg-white rounded-lg shadow p-6">
             <h2 className="text-lg font-semibold mb-4">📌 Notes</h2>
@@ -535,7 +740,18 @@ export default function LeadDetail() {
           </div>
         </div>
       </Modal>
-    </Layout>
+
+      {/* Lost Reason Modal */}
+      <LostReasonModal
+        isOpen={showLostModal}
+        onClose={() => {
+          setShowLostModal(false)
+          setPendingLostStatus('')
+        }}
+        onConfirm={handleLostConfirm}
+        leadName={lead?.full_name || `${lead?.first_name} ${lead?.last_name}`.trim() || lead?.email}
+      />
+    </>
   )
 }
 

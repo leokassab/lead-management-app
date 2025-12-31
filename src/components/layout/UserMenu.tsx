@@ -26,15 +26,15 @@ export default function UserMenu() {
     <Dropdown
       align="right"
       trigger={
-        <div className="flex items-center gap-3 cursor-pointer hover:bg-white/10 rounded-lg p-1.5 transition-colors">
+        <div className="flex items-center gap-3 cursor-pointer hover:bg-gray-100 rounded-lg p-1.5 transition-colors">
           <Avatar
             src={profile?.avatar_url}
             alt={userName}
             size="sm"
           />
           <div className="hidden md:block text-left">
-            <div className="text-sm font-medium text-white">{userName}</div>
-            <div className="text-xs text-gray-400">
+            <div className="text-sm font-medium text-gray-900">{userName}</div>
+            <div className="text-xs text-gray-500">
               {profile?.role ? roleLabels[profile.role] : ''}
             </div>
           </div>
@@ -49,7 +49,7 @@ export default function UserMenu() {
         </div>
       }
     >
-      <div className="px-4 py-3 border-b">
+      <div className="px-4 py-3 border-b border-gray-100">
         <div className="text-sm font-medium text-gray-900">{userName}</div>
         <div className="text-xs text-gray-500">{profile?.email}</div>
       </div>

@@ -14,7 +14,6 @@ import {
   Legend,
   ResponsiveContainer,
 } from 'recharts'
-import { Layout } from '../components/layout'
 import { Button, Avatar, Badge } from '../components/ui'
 import { useStatistics, calculateStats, type Period } from '../hooks/useStatistics'
 import { formatCurrency } from '../utils/formatters'
@@ -56,8 +55,7 @@ export default function Statistics() {
   }
 
   return (
-    <Layout>
-      <div className="space-y-6">
+    <div className="space-y-6">
         {/* Header */}
         <div className="flex justify-between items-center">
           <h1 className="text-2xl font-bold text-gray-900">Statistiques</h1>
@@ -680,7 +678,6 @@ export default function Statistics() {
             )}
           </>
         )}
-      </div>
-    </Layout>
+    </div>
   )
 }

@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { Button, Input, Select, Textarea, Modal } from '../ui'
 import { supabase } from '../../lib/supabase'
 import { useAuthStore } from '../../stores/authStore'
+import { analyzeAndApplyToLead, getTeamAIConfig, autoGenerateScriptForLead } from '../../services/ai'
+import { enrichAndSaveLead } from '../../services/enrichmentService'
 import type { Lead, CustomStatus, User } from '../../types'
 
 interface LeadFormProps {
@@ -103,11 +105,36 @@ export default function LeadForm({
 
         if (updateError) throw updateError
       } else {
-        const { error: insertError } = await supabase
+        const { data: newLead, error: insertError } = await supabase
           .from('leads')
           .insert(leadData)
+          .select()
+          .single()
 
         if (insertError) throw insertError
+
+        // Trigger auto-scoring, auto-enrichment, and auto-script generation for new leads (runs in background)
+        if (newLead && profile?.team_id) {
+          getTeamAIConfig(profile.team_id).then(aiConfig => {
+            // Auto-scoring (always enabled by default)
+            if (aiConfig.auto_scoring) {
+              analyzeAndApplyToLead(newLead as Lead, profile.team_id, false)
+                .catch(err => console.error('Auto-scoring error:', err))
+            }
+
+            // Auto-enrichment (if enabled)
+            if (aiConfig.auto_enrichment) {
+              enrichAndSaveLead(newLead.id, newLead as Lead)
+                .catch(err => console.error('Auto-enrichment error:', err))
+            }
+
+            // Auto-script generation (if enabled)
+            if (aiConfig.auto_script_generation) {
+              autoGenerateScriptForLead(newLead as Lead, profile.team_id)
+                .catch(err => console.error('Auto-script generation error:', err))
+            }
+          })
+        }
       }
 
       onSuccess()
