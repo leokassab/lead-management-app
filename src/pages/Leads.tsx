@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Button, Badge, Avatar } from '../components/ui'
+import { Button, Avatar } from '../components/ui'
 import { ActionBadge } from '../components/actions'
 import LeadForm from '../components/leads/LeadForm'
 import ImportModal from '../components/leads/ImportModal'
@@ -8,9 +8,10 @@ import { LostReasonModal } from '../components/leads'
 import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../stores/authStore'
 import { useLeads } from '../hooks/useLeads'
+import { useLeadsInSequences } from '../hooks/useLeadSequence'
 import { isLostStatus } from '../hooks/useLostReasons'
 import { formatDate } from '../utils/formatters'
-import type { Lead, User, LeadAction } from '../types'
+import type { Lead, User } from '../types'
 import { LEAD_ACTIONS } from '../types'
 
 type PeriodFilter = 'today' | 'week' | 'month' | 'all'
@@ -169,6 +170,10 @@ export default function Leads() {
     }
   }, [periodFilteredLeads, statuses])
 
+  // Get leads in sequences
+  const leadIds = useMemo(() => paginatedLeads.map(l => l.id), [paginatedLeads])
+  const { sequenceMap } = useLeadsInSequences(leadIds)
+
   // Handlers
   const handleSelectAll = () => {
     if (selectedLeads.length === paginatedLeads.length) {
@@ -308,11 +313,6 @@ export default function Leads() {
   }
 
   const hasFilters = search || statusFilter.length > 0 || priorityFilter || actionFilter || tagFilter.length > 0 || assigneeFilter
-
-  const getStatusColor = (statusName: string) => {
-    const status = statuses.find(s => s.name === statusName)
-    return status?.color || '#9CA3AF'
-  }
 
   const getPriorityIndicator = (priority: Lead['priority']) => {
     switch (priority) {
@@ -632,7 +632,17 @@ export default function Leads() {
                         />
                       </td>
                       <td className="p-4">
-                        <div className="font-medium text-gray-900">{getLeadName(lead)}</div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-gray-900">{getLeadName(lead)}</span>
+                          {sequenceMap[lead.id] && (
+                            <span
+                              className="text-blue-500"
+                              title="Dans une séquence active"
+                            >
+                              🔄
+                            </span>
+                          )}
+                        </div>
                         {lead.company_name && (
                           <div className="text-sm text-gray-500">{lead.company_name}</div>
                         )}

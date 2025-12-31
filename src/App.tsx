@@ -8,6 +8,9 @@ import Dashboard from './pages/Dashboard'
 import Queue from './pages/Queue'
 import Leads from './pages/Leads'
 import LeadDetail from './pages/LeadDetail'
+import Sequences from './pages/Sequences'
+import SequenceBuilder from './pages/SequenceBuilder'
+import Calendar from './pages/Calendar'
 import Statistics from './pages/Statistics'
 import Settings from './pages/Settings'
 import ProtectedRoute from './components/ProtectedRoute'
@@ -73,13 +76,41 @@ function App() {
           }
         />
         <Route
+          path="/sequences"
+          element={
+            <ProtectedRoute>
+              <Layout>
+                <Sequences />
+              </Layout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/sequences/new"
+          element={
+            <ProtectedRoute>
+              <Layout>
+                <SequenceBuilder />
+              </Layout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/sequences/:id"
+          element={
+            <ProtectedRoute>
+              <Layout>
+                <SequenceBuilder />
+              </Layout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
           path="/calendrier"
           element={
             <ProtectedRoute>
               <Layout>
-                <div className="text-center py-12 text-gray-500">
-                  Page Calendrier - À venir
-                </div>
+                <Calendar />
               </Layout>
             </ProtectedRoute>
           }

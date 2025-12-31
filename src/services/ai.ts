@@ -76,8 +76,6 @@ async function callOpenAI(
   messages: { role: 'system' | 'user' | 'assistant'; content: string }[],
   config: AIServiceConfig
 ): Promise<{ content: string; tokens: number }> {
-  const startTime = Date.now()
-
   const response = await fetch(OPENAI_API_URL, {
     method: 'POST',
     headers: {
@@ -98,7 +96,6 @@ async function callOpenAI(
   }
 
   const data = await response.json()
-  const processingTime = Date.now() - startTime
 
   return {
     content: data.choices[0]?.message?.content || '',
@@ -252,7 +249,7 @@ Retourne UNIQUEMENT le JSON, sans markdown.`
     lead.id,
     isRescore ? 'rescore' : 'initial_scoring',
     { lead: buildLeadContext(lead) },
-    result,
+    { ...result } as Record<string, unknown>,
     result.reasoning,
     result.confidence,
     'gpt-4o-mini',
@@ -716,4 +713,111 @@ export async function suggestNextAction(lead: Lead, teamId?: string) {
   }
   const result = await suggestAction(lead, teamId)
   return { ...result, script: undefined }
+}
+
+// Search query interface
+export interface SearchQuery {
+  query: string
+  source: 'linkedin' | 'google' | 'societe.com' | 'other'
+  purpose: string
+}
+
+export interface SearchHypothesis {
+  hypothesis: string
+  confidence: number
+}
+
+export interface SearchSuggestionsResult {
+  queries: SearchQuery[]
+  hypotheses: SearchHypothesis[]
+}
+
+// Generate search queries for a lead (manual feature)
+export async function generateSearchQueries(
+  lead: Lead,
+  teamId?: string
+): Promise<SearchSuggestionsResult> {
+  const apiKey = await getApiKey(teamId)
+
+  if (!apiKey) {
+    throw new Error('Clé API OpenAI non configurée. Allez dans Paramètres > Intégrations.')
+  }
+
+  const leadContext = buildLeadContext(lead)
+
+  const systemPrompt = `Tu es un expert en recherche commerciale B2B.
+Tu dois générer des requêtes de recherche pour aider un commercial à trouver plus d'informations sur un lead.
+
+IMPORTANT: Tu génères UNIQUEMENT des requêtes que le commercial peut copier-coller dans Google ou LinkedIn.
+Ce n'est PAS du scraping, juste des suggestions de recherche.
+
+Pour chaque requête, indique:
+- query: la requête exacte à chercher
+- source: "linkedin" (pour LinkedIn), "google" (pour Google), "societe.com" (pour infos entreprise française)
+- purpose: pourquoi cette recherche est utile
+
+Génère aussi des hypothèses basées sur les informations disponibles:
+- hypothesis: ce que tu supposes sur le lead
+- confidence: niveau de confiance (0 à 1)
+
+Retourne un JSON avec:
+{
+  "queries": [
+    { "query": "...", "source": "linkedin", "purpose": "..." },
+    ...
+  ],
+  "hypotheses": [
+    { "hypothesis": "...", "confidence": 0.8 },
+    ...
+  ]
+}
+
+Génère 3-5 requêtes pertinentes et 2-3 hypothèses.
+Retourne UNIQUEMENT le JSON, sans markdown.`
+
+  const { content } = await callOpenAI(
+    [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `Génère des requêtes de recherche pour ce lead:\n\n${leadContext}` },
+    ],
+    { apiKey }
+  )
+
+  try {
+    const cleanJson = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+    return JSON.parse(cleanJson)
+  } catch {
+    return {
+      queries: [
+        {
+          query: `${lead.full_name || `${lead.first_name} ${lead.last_name}`} LinkedIn`,
+          source: 'linkedin',
+          purpose: 'Trouver le profil LinkedIn'
+        },
+        {
+          query: `${lead.company_name || ''} entreprise`,
+          source: 'google',
+          purpose: 'Informations sur l\'entreprise'
+        }
+      ],
+      hypotheses: []
+    }
+  }
+}
+
+// Save search results to lead
+export async function saveSearchResults(
+  leadId: string,
+  results: SearchSuggestionsResult
+): Promise<boolean> {
+  const { error } = await supabase
+    .from('leads')
+    .update({
+      ai_search_performed: true,
+      ai_search_results: results,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', leadId)
+
+  return !error
 }

@@ -187,6 +187,13 @@ export interface Lead {
   phone_type?: 'mobile' | 'landline' | 'voip' | 'unknown'
   enriched_at?: string
 
+  // AI Search suggestions
+  ai_search_performed?: boolean
+  ai_search_results?: {
+    queries: { query: string; source: string; purpose: string }[]
+    hypotheses: { hypothesis: string; confidence: number }[]
+  }
+
   created_at: string
   updated_at: string
 

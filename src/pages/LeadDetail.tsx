@@ -2,13 +2,16 @@ import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Button, Badge, Avatar, Modal, Input, Select } from '../components/ui'
 import AIPanel from '../components/leads/AIPanel'
-import { LostReasonModal } from '../components/leads'
+import { LostReasonModal, LeadSequenceSection } from '../components/leads'
 import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../stores/authStore'
 import { formatDateTime, formatDate } from '../utils/formatters'
 import { getPriorityLabel, getNextActionLabel } from '../utils/helpers'
 import { isLostStatus } from '../hooks/useLostReasons'
-import { enrichAndSaveLead, getEnrichmentSummary } from '../services/enrichmentService'
+import { useLeadMeetings } from '../hooks/useMeetings'
+import { enrichAndSaveLead } from '../services/enrichmentService'
+import { generateSearchQueries, saveSearchResults, type SearchSuggestionsResult } from '../services/ai'
+import { MEETING_TYPE_LABELS, MEETING_STATUS_LABELS } from '../types/meetings'
 import type { Lead, CustomStatus, Activity, User } from '../types'
 
 export default function LeadDetail() {
@@ -40,6 +43,14 @@ export default function LeadDetail() {
 
   // Enrichment
   const [enriching, setEnriching] = useState(false)
+
+  // AI Search
+  const [showSearchModal, setShowSearchModal] = useState(false)
+  const [searching, setSearching] = useState(false)
+  const [searchResults, setSearchResults] = useState<SearchSuggestionsResult | null>(null)
+
+  // Lead meetings
+  const { meetings: leadMeetings } = useLeadMeetings(id)
 
   useEffect(() => {
     if (id && profile?.team_id) {
@@ -275,6 +286,44 @@ export default function LeadDetail() {
       console.error('Error enriching lead:', error)
     } finally {
       setEnriching(false)
+    }
+  }
+
+  const handleSearchLead = async () => {
+    if (!lead) return
+
+    setSearching(true)
+    setShowSearchModal(true)
+
+    try {
+      const results = await generateSearchQueries(lead, profile?.team_id)
+      setSearchResults(results)
+      await saveSearchResults(lead.id, results)
+      setLead({ ...lead, ai_search_performed: true, ai_search_results: results })
+    } catch (error) {
+      console.error('Error generating search queries:', error)
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  const getSearchUrl = (query: string, source: string): string => {
+    const encodedQuery = encodeURIComponent(query)
+    switch (source) {
+      case 'linkedin':
+        return `https://www.linkedin.com/search/results/all/?keywords=${encodedQuery}`
+      case 'societe.com':
+        return `https://www.societe.com/cgi-bin/search?champs=${encodedQuery}`
+      default:
+        return `https://www.google.com/search?q=${encodedQuery}`
+    }
+  }
+
+  const getSourceIcon = (source: string): string => {
+    switch (source) {
+      case 'linkedin': return '💼'
+      case 'societe.com': return '🏢'
+      default: return '🔍'
     }
   }
 
@@ -545,6 +594,54 @@ export default function LeadDetail() {
             )}
           </section>
 
+          {/* RDV */}
+          {leadMeetings.length > 0 && (
+            <section className="bg-white rounded-lg shadow p-6">
+              <h2 className="text-lg font-semibold mb-4">📅 Rendez-vous</h2>
+              <div className="space-y-3">
+                {leadMeetings.map(meeting => {
+                  const statusConfig = MEETING_STATUS_LABELS[meeting.status]
+                  const typeConfig = MEETING_TYPE_LABELS[meeting.type]
+                  const isNoShow = meeting.status === 'no_show'
+
+                  return (
+                    <div
+                      key={meeting.id}
+                      className={`p-4 rounded-lg border ${
+                        isNoShow ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-center gap-3">
+                          <span className="text-xl">{typeConfig.icon}</span>
+                          <div>
+                            <div className={`font-medium ${isNoShow ? 'text-red-800' : 'text-gray-900'}`}>
+                              {meeting.title}
+                            </div>
+                            <div className={`text-sm ${isNoShow ? 'text-red-600' : 'text-gray-500'}`}>
+                              {formatDateTime(meeting.scheduled_at)} • {meeting.duration_minutes} min
+                            </div>
+                          </div>
+                        </div>
+                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusConfig.color}`}>
+                          {isNoShow && '❌ '}{statusConfig.label}
+                        </span>
+                      </div>
+                      {meeting.outcome && (
+                        <div className="mt-2 text-sm text-gray-600">
+                          <span className="font-medium">Résultat:</span> {meeting.outcome}
+                        </div>
+                      )}
+                      {meeting.notes && (
+                        <div className="mt-1 text-sm text-gray-500">{meeting.notes}</div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </section>
+          )}
+
           {/* Historique & Commentaires */}
           <section className="bg-white rounded-lg shadow p-6">
             <h2 className="text-lg font-semibold mb-4">💬 Historique & Commentaires</h2>
@@ -622,6 +719,14 @@ export default function LeadDetail() {
               <Button variant="outline" className="w-full justify-start" onClick={() => setShowActionModal(true)}>
                 📅 Planifier action
               </Button>
+              <Button
+                variant="outline"
+                className="w-full justify-start"
+                onClick={handleSearchLead}
+                disabled={searching}
+              >
+                {searching ? '⏳ Recherche...' : '🔍 Rechercher ce lead'}
+              </Button>
 
               <hr className="my-3" />
 
@@ -651,6 +756,9 @@ export default function LeadDetail() {
               )}
             </div>
           </section>
+
+          {/* Séquence */}
+          <LeadSequenceSection leadId={lead.id} />
 
           {/* Prochaine action */}
           <section className="bg-white rounded-lg shadow p-6">
@@ -751,6 +859,103 @@ export default function LeadDetail() {
         onConfirm={handleLostConfirm}
         leadName={lead?.full_name || `${lead?.first_name} ${lead?.last_name}`.trim() || lead?.email}
       />
+
+      {/* Search Suggestions Modal */}
+      <Modal
+        isOpen={showSearchModal}
+        onClose={() => setShowSearchModal(false)}
+        title="🔍 Suggestions de recherche"
+        size="lg"
+      >
+        <div className="space-y-6">
+          {searching ? (
+            <div className="flex flex-col items-center justify-center py-12">
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
+              <p className="text-gray-600">Génération des suggestions de recherche...</p>
+            </div>
+          ) : searchResults ? (
+            <>
+              {/* Search queries */}
+              <div>
+                <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                  <span>🔎</span>
+                  Requêtes de recherche
+                </h3>
+                <div className="space-y-3">
+                  {searchResults.queries.map((query, index) => (
+                    <div
+                      key={index}
+                      className="p-4 bg-gray-50 rounded-lg border hover:border-blue-300 transition-colors"
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span>{getSourceIcon(query.source)}</span>
+                            <span className="text-xs font-medium uppercase text-gray-500">
+                              {query.source}
+                            </span>
+                          </div>
+                          <p className="font-medium text-gray-900 mb-1">{query.query}</p>
+                          <p className="text-sm text-gray-600">{query.purpose}</p>
+                        </div>
+                        <a
+                          href={getSearchUrl(query.query, query.source)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex-shrink-0 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium"
+                        >
+                          Rechercher →
+                        </a>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Hypotheses */}
+              {searchResults.hypotheses && searchResults.hypotheses.length > 0 && (
+                <div>
+                  <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                    <span>💡</span>
+                    Hypothèses
+                  </h3>
+                  <div className="space-y-2">
+                    {searchResults.hypotheses.map((hyp, index) => (
+                      <div
+                        key={index}
+                        className="p-3 bg-yellow-50 rounded-lg border border-yellow-200"
+                      >
+                        <div className="flex items-start justify-between gap-4">
+                          <p className="text-gray-800">{hyp.hypothesis}</p>
+                          <div className="flex-shrink-0">
+                            <span className={`px-2 py-1 rounded text-xs font-medium ${
+                              hyp.confidence >= 0.7 ? 'bg-green-100 text-green-700' :
+                              hyp.confidence >= 0.4 ? 'bg-yellow-100 text-yellow-700' :
+                              'bg-gray-100 text-gray-600'
+                            }`}>
+                              {Math.round(hyp.confidence * 100)}% confiance
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="text-center py-8 text-gray-500">
+              Aucune suggestion générée
+            </div>
+          )}
+
+          <div className="flex justify-end pt-4 border-t">
+            <Button onClick={() => setShowSearchModal(false)}>
+              Fermer
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </>
   )
 }
