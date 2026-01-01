@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import {
   LineChart,
   Line,
@@ -14,13 +14,23 @@ import {
   Legend,
   ResponsiveContainer,
 } from 'recharts'
-import { Button, Avatar, Badge } from '../components/ui'
+import { Button, Avatar, Badge, Modal } from '../components/ui'
 import { useStatistics, calculateStats, type Period } from '../hooks/useStatistics'
 import { formatCurrency } from '../utils/formatters'
 import FunnelChart from '../components/stats/FunnelChart'
 import LostReasonsChart, { DropOffChart } from '../components/stats/LostReasonsChart'
 import { useSLAStats } from '../hooks/useSLATracking'
 import { SLA_STATUS_COLORS } from '../types/sla'
+import { useAuthStore } from '../stores/authStore'
+import {
+  generateCoachingTips,
+  getCoachingTips,
+  saveCoachingTips,
+  type CoachingTipsResult,
+  type PerformanceData,
+  type CoachingImprovementArea,
+} from '../services/ai'
+import { supabase } from '../lib/supabase'
 
 type Tab = 'overview' | 'sources' | 'team' | 'quality' | 'funnel' | 'sla'
 
@@ -38,9 +48,38 @@ const CHART_COLORS = [
   '#EC4899', '#06B6D4', '#84CC16', '#F97316', '#6366F1',
 ]
 
+// Types for coaching modal
+interface SelectedMemberForCoaching {
+  user: {
+    id: string
+    first_name: string
+    last_name: string
+    avatar_url?: string
+    team_id?: string
+    monthly_lead_target?: number
+    monthly_closing_target?: number
+  }
+  leads: number
+  contacted: number
+  closings: number
+  revenue: number
+  conversionRate: number
+}
+
 export default function Statistics() {
   const { leads, statuses, teamMembers, loading, period, setPeriod, dateRange } = useStatistics()
+  const { profile } = useAuthStore()
   const [activeTab, setActiveTab] = useState<Tab>('overview')
+
+  // Coaching modal state
+  const [coachingModalOpen, setCoachingModalOpen] = useState(false)
+  const [selectedMember, setSelectedMember] = useState<SelectedMemberForCoaching | null>(null)
+  const [coachingTips, setCoachingTips] = useState<CoachingTipsResult | null>(null)
+  const [coachingLoading, setCoachingLoading] = useState(false)
+  const [coachingError, setCoachingError] = useState<string | null>(null)
+  const [coachingGeneratedAt, setCoachingGeneratedAt] = useState<string | null>(null)
+
+  const isManager = profile?.role === 'admin' || profile?.role === 'manager'
 
   const stats = useMemo(
     () => calculateStats(leads, statuses, teamMembers, dateRange),
@@ -57,6 +96,123 @@ export default function Statistics() {
     if (value < 0) return 'text-red-600'
     return 'text-gray-500'
   }
+
+  // Open coaching modal for a team member
+  const openCoachingModal = useCallback(async (member: SelectedMemberForCoaching) => {
+    setSelectedMember(member)
+    setCoachingModalOpen(true)
+    setCoachingLoading(true)
+    setCoachingError(null)
+    setCoachingTips(null)
+
+    try {
+      // First try to load existing coaching tips
+      const existing = await getCoachingTips(member.user.id)
+      if (existing) {
+        setCoachingTips(existing)
+        // Get generated_at from DB
+        const { data } = await supabase
+          .from('user_performance_profiles')
+          .select('coaching_generated_at')
+          .eq('user_id', member.user.id)
+          .single()
+        setCoachingGeneratedAt(data?.coaching_generated_at || null)
+      }
+    } catch (err) {
+      console.error('Error loading coaching tips:', err)
+    } finally {
+      setCoachingLoading(false)
+    }
+  }, [])
+
+  // Generate new coaching tips
+  const handleGenerateCoaching = useCallback(async () => {
+    if (!selectedMember || !profile?.team_id) return
+
+    setCoachingLoading(true)
+    setCoachingError(null)
+
+    try {
+      // Build performance data from the selected member
+      const memberLeads = leads.filter(l => l.assigned_to === selectedMember.user.id)
+
+      // Group leads by source
+      const sourceMap = new Map<string, { count: number; closings: number }>()
+      memberLeads.forEach(lead => {
+        const source = lead.source || 'Autre'
+        const existing = sourceMap.get(source) || { count: 0, closings: 0 }
+        existing.count++
+        if (lead.status === 'Closing' || lead.status === 'Gagné') {
+          existing.closings++
+        }
+        sourceMap.set(source, existing)
+      })
+
+      // Group leads by sector
+      const sectorMap = new Map<string, { count: number; closings: number }>()
+      memberLeads.forEach(lead => {
+        const sector = lead.sector || 'Autre'
+        const existing = sectorMap.get(sector) || { count: 0, closings: 0 }
+        existing.count++
+        if (lead.status === 'Closing' || lead.status === 'Gagné') {
+          existing.closings++
+        }
+        sectorMap.set(sector, existing)
+      })
+
+      const leadProgress = selectedMember.user.monthly_lead_target && selectedMember.user.monthly_lead_target > 0
+        ? Math.round((selectedMember.leads / selectedMember.user.monthly_lead_target) * 100)
+        : undefined
+      const closingProgress = selectedMember.user.monthly_closing_target && selectedMember.user.monthly_closing_target > 0
+        ? Math.round((selectedMember.closings / selectedMember.user.monthly_closing_target) * 100)
+        : undefined
+
+      const performanceData: PerformanceData = {
+        userId: selectedMember.user.id,
+        userName: `${selectedMember.user.first_name} ${selectedMember.user.last_name}`,
+        leadsCount: selectedMember.leads,
+        contactedCount: selectedMember.contacted,
+        closingsCount: selectedMember.closings,
+        revenue: selectedMember.revenue,
+        conversionRate: selectedMember.conversionRate,
+        avgResponseTimeHours: null, // Would need SLA data
+        slaMetPercentage: null,
+        slaBreached: 0,
+        leadsBySource: Array.from(sourceMap.entries()).map(([source, data]) => ({
+          source,
+          count: data.count,
+          closings: data.closings,
+        })),
+        leadsBySector: Array.from(sectorMap.entries()).map(([sector, data]) => ({
+          sector,
+          count: data.count,
+          closings: data.closings,
+        })),
+        monthlyLeadTarget: selectedMember.user.monthly_lead_target,
+        monthlyClosingTarget: selectedMember.user.monthly_closing_target,
+        leadProgress,
+        closingProgress,
+      }
+
+      const tips = await generateCoachingTips(performanceData, profile.team_id)
+      await saveCoachingTips(selectedMember.user.id, tips)
+      setCoachingTips(tips)
+      setCoachingGeneratedAt(new Date().toISOString())
+    } catch (err) {
+      console.error('Error generating coaching tips:', err)
+      setCoachingError(err instanceof Error ? err.message : 'Erreur lors de la generation des conseils')
+    } finally {
+      setCoachingLoading(false)
+    }
+  }, [selectedMember, profile?.team_id, leads])
+
+  const closeCoachingModal = useCallback(() => {
+    setCoachingModalOpen(false)
+    setSelectedMember(null)
+    setCoachingTips(null)
+    setCoachingError(null)
+    setCoachingGeneratedAt(null)
+  }, [])
 
   return (
     <div className="space-y-6">
@@ -499,69 +655,134 @@ export default function Statistics() {
                   <div className="p-4 border-b">
                     <h3 className="font-semibold">Classement des commerciaux</h3>
                   </div>
-                  <table className="w-full">
-                    <thead className="bg-gray-50">
-                      <tr>
-                        <th className="p-4 text-left text-sm font-medium text-gray-600">#</th>
-                        <th className="p-4 text-left text-sm font-medium text-gray-600">Commercial</th>
-                        <th className="p-4 text-right text-sm font-medium text-gray-600">Leads</th>
-                        <th className="p-4 text-right text-sm font-medium text-gray-600">Contactés</th>
-                        <th className="p-4 text-right text-sm font-medium text-gray-600">Closings</th>
-                        <th className="p-4 text-right text-sm font-medium text-gray-600">CA</th>
-                        <th className="p-4 text-right text-sm font-medium text-gray-600">Taux conv.</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {stats.teamPerformance.map((member, index) => (
-                        <tr key={member.user.id} className="border-t hover:bg-gray-50">
-                          <td className="p-4">
-                            {index === 0 && <span className="text-xl">🥇</span>}
-                            {index === 1 && <span className="text-xl">🥈</span>}
-                            {index === 2 && <span className="text-xl">🥉</span>}
-                            {index > 2 && <span className="text-gray-400">{index + 1}</span>}
-                          </td>
-                          <td className="p-4">
-                            <div className="flex items-center gap-3">
-                              <Avatar
-                                src={member.user.avatar_url}
-                                alt={`${member.user.first_name} ${member.user.last_name}`}
-                                size="sm"
-                              />
-                              <div>
-                                <div className="font-medium">
-                                  {member.user.first_name} {member.user.last_name}
-                                </div>
-                                <div className="text-xs text-gray-500">{member.user.role}</div>
-                              </div>
-                            </div>
-                          </td>
-                          <td className="p-4 text-right font-medium">{member.leads}</td>
-                          <td className="p-4 text-right">{member.contacted}</td>
-                          <td className="p-4 text-right">
-                            <Badge variant={member.closings > 0 ? 'success' : 'default'}>
-                              {member.closings}
-                            </Badge>
-                          </td>
-                          <td className="p-4 text-right font-medium text-green-600">
-                            {formatCurrency(member.revenue)}
-                          </td>
-                          <td className="p-4 text-right">
-                            <div className="flex items-center justify-end gap-2">
-                              <div className="w-16 bg-gray-200 rounded-full h-2">
-                                <div
-                                  className="h-2 rounded-full bg-blue-600"
-                                  style={{ width: `${Math.min(member.conversionRate, 100)}%` }}
-                                />
-                              </div>
-                              <span className="text-sm font-medium w-12">
-                                {member.conversionRate.toFixed(1)}%
-                              </span>
-                            </div>
-                          </td>
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="p-4 text-left text-sm font-medium text-gray-600">#</th>
+                          <th className="p-4 text-left text-sm font-medium text-gray-600">Commercial</th>
+                          <th className="p-4 text-right text-sm font-medium text-gray-600">Leads</th>
+                          <th className="p-4 text-right text-sm font-medium text-gray-600">Closings</th>
+                          <th className="p-4 text-center text-sm font-medium text-gray-600">🎯 Objectifs</th>
+                          <th className="p-4 text-right text-sm font-medium text-gray-600">CA</th>
+                          <th className="p-4 text-right text-sm font-medium text-gray-600">Taux conv.</th>
+                          {isManager && (
+                            <th className="p-4 text-center text-sm font-medium text-gray-600">Coaching</th>
+                          )}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {stats.teamPerformance.map((member, index) => {
+                          const leadTarget = member.user.monthly_lead_target || 0
+                          const closingTarget = member.user.monthly_closing_target || 0
+                          const leadProgress = leadTarget > 0 ? Math.round((member.leads / leadTarget) * 100) : 0
+                          const closingProgress = closingTarget > 0 ? Math.round((member.closings / closingTarget) * 100) : 0
+
+                          const getProgressColor = (progress: number) => {
+                            if (progress >= 80) return 'bg-green-500'
+                            if (progress >= 50) return 'bg-orange-500'
+                            return 'bg-red-500'
+                          }
+
+                          return (
+                            <tr key={member.user.id} className="border-t hover:bg-gray-50">
+                              <td className="p-4">
+                                {index === 0 && <span className="text-xl">🥇</span>}
+                                {index === 1 && <span className="text-xl">🥈</span>}
+                                {index === 2 && <span className="text-xl">🥉</span>}
+                                {index > 2 && <span className="text-gray-400">{index + 1}</span>}
+                              </td>
+                              <td className="p-4">
+                                <div className="flex items-center gap-3">
+                                  <Avatar
+                                    src={member.user.avatar_url}
+                                    alt={`${member.user.first_name} ${member.user.last_name}`}
+                                    size="sm"
+                                  />
+                                  <div>
+                                    <div className="font-medium">
+                                      {member.user.first_name} {member.user.last_name}
+                                    </div>
+                                    <div className="text-xs text-gray-500">{member.user.role}</div>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="p-4 text-right font-medium">{member.leads}</td>
+                              <td className="p-4 text-right">
+                                <Badge variant={member.closings > 0 ? 'success' : 'default'}>
+                                  {member.closings}
+                                </Badge>
+                              </td>
+                              <td className="p-4">
+                                {leadTarget > 0 || closingTarget > 0 ? (
+                                  <div className="space-y-2">
+                                    {leadTarget > 0 && (
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-xs text-gray-500 w-12">Leads</span>
+                                        <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
+                                          <div
+                                            className={`h-full rounded-full ${getProgressColor(leadProgress)}`}
+                                            style={{ width: `${Math.min(leadProgress, 100)}%` }}
+                                          />
+                                        </div>
+                                        <span className="text-xs font-medium w-16 text-right">
+                                          {member.leads}/{leadTarget}
+                                        </span>
+                                      </div>
+                                    )}
+                                    {closingTarget > 0 && (
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-xs text-gray-500 w-12">Close</span>
+                                        <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
+                                          <div
+                                            className={`h-full rounded-full ${getProgressColor(closingProgress)}`}
+                                            style={{ width: `${Math.min(closingProgress, 100)}%` }}
+                                          />
+                                        </div>
+                                        <span className="text-xs font-medium w-16 text-right">
+                                          {member.closings}/{closingTarget}
+                                        </span>
+                                      </div>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-xs text-gray-400">Non defini</span>
+                                )}
+                              </td>
+                              <td className="p-4 text-right font-medium text-green-600">
+                                {formatCurrency(member.revenue)}
+                              </td>
+                              <td className="p-4 text-right">
+                                <div className="flex items-center justify-end gap-2">
+                                  <div className="w-16 bg-gray-200 rounded-full h-2">
+                                    <div
+                                      className="h-2 rounded-full bg-blue-600"
+                                      style={{ width: `${Math.min(member.conversionRate, 100)}%` }}
+                                    />
+                                  </div>
+                                  <span className="text-sm font-medium w-12">
+                                    {member.conversionRate.toFixed(1)}%
+                                  </span>
+                                </div>
+                              </td>
+                              {isManager && (
+                                <td className="p-4 text-center">
+                                  <button
+                                    onClick={() => openCoachingModal(member)}
+                                    className="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-purple-600 bg-purple-50 rounded-lg hover:bg-purple-100 transition-colors"
+                                    title="Voir les conseils de coaching IA"
+                                  >
+                                    <span>💡</span>
+                                    <span>Coaching</span>
+                                  </button>
+                                </td>
+                              )}
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
             )}
@@ -712,6 +933,140 @@ export default function Statistics() {
             )}
           </>
         )}
+
+        {/* Coaching Modal */}
+        <Modal
+          isOpen={coachingModalOpen}
+          onClose={closeCoachingModal}
+          title={selectedMember ? `💡 Coaching IA - ${selectedMember.user.first_name} ${selectedMember.user.last_name}` : 'Coaching IA'}
+          size="lg"
+        >
+          <div className="space-y-6">
+            {coachingLoading && (
+              <div className="flex items-center justify-center py-8">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-600" />
+                <span className="ml-3 text-gray-600">Chargement des conseils...</span>
+              </div>
+            )}
+
+            {coachingError && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                <div className="flex items-center gap-2 text-red-600">
+                  <span>⚠️</span>
+                  <span className="font-medium">Erreur</span>
+                </div>
+                <p className="text-sm text-red-700 mt-1">{coachingError}</p>
+              </div>
+            )}
+
+            {!coachingLoading && !coachingTips && !coachingError && (
+              <div className="text-center py-8">
+                <div className="text-5xl mb-4">🤖</div>
+                <h3 className="text-lg font-medium text-gray-900 mb-2">
+                  Aucun conseil de coaching genere
+                </h3>
+                <p className="text-gray-500 mb-4">
+                  Generez des conseils personnalises bases sur les performances de ce commercial.
+                </p>
+                <Button onClick={handleGenerateCoaching}>
+                  🔄 Generer les conseils
+                </Button>
+              </div>
+            )}
+
+            {coachingTips && !coachingLoading && (
+              <>
+                {/* Header with regenerate button */}
+                <div className="flex items-center justify-between">
+                  <div className="text-sm text-gray-500">
+                    {coachingGeneratedAt && (
+                      <>Genere le {new Date(coachingGeneratedAt).toLocaleDateString('fr-FR', {
+                        day: 'numeric',
+                        month: 'long',
+                        year: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}</>
+                    )}
+                  </div>
+                  <Button variant="outline" size="sm" onClick={handleGenerateCoaching}>
+                    🔄 Regenerer
+                  </Button>
+                </div>
+
+                {/* Summary */}
+                {coachingTips.summary && (
+                  <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
+                    <div className="text-sm font-medium text-purple-700 mb-1">Resume</div>
+                    <p className="text-purple-900">{coachingTips.summary}</p>
+                  </div>
+                )}
+
+                {/* Strengths */}
+                {coachingTips.strengths.length > 0 && (
+                  <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                    <h4 className="font-medium text-green-800 mb-3 flex items-center gap-2">
+                      <span>💪</span> Points forts
+                    </h4>
+                    <ul className="space-y-2">
+                      {coachingTips.strengths.map((strength, idx) => (
+                        <li key={idx} className="flex items-start gap-2 text-green-700">
+                          <span className="text-green-500 mt-0.5">✓</span>
+                          <span>{strength}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Improvement Areas */}
+                {coachingTips.improvement_areas.length > 0 && (
+                  <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
+                    <h4 className="font-medium text-orange-800 mb-3 flex items-center gap-2">
+                      <span>📈</span> Axes d'amelioration
+                    </h4>
+                    <div className="space-y-3">
+                      {coachingTips.improvement_areas.map((item: CoachingImprovementArea, idx: number) => (
+                        <div key={idx} className="bg-white rounded-lg p-3 border border-orange-100">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="font-medium text-orange-900">{item.area}</span>
+                            <Badge
+                              variant={
+                                item.priority === 'high' ? 'danger' :
+                                item.priority === 'medium' ? 'warning' : 'default'
+                              }
+                            >
+                              {item.priority === 'high' ? 'Priorite haute' :
+                               item.priority === 'medium' ? 'Priorite moyenne' : 'Priorite basse'}
+                            </Badge>
+                          </div>
+                          <p className="text-sm text-orange-700">{item.tip}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Quick Wins */}
+                {coachingTips.quick_wins.length > 0 && (
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                    <h4 className="font-medium text-blue-800 mb-3 flex items-center gap-2">
+                      <span>⚡</span> Quick Wins
+                    </h4>
+                    <ul className="space-y-2">
+                      {coachingTips.quick_wins.map((win, idx) => (
+                        <li key={idx} className="flex items-start gap-2 text-blue-700">
+                          <span className="text-blue-500 mt-0.5">→</span>
+                          <span>{win}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </Modal>
     </div>
   )
 }

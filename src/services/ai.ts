@@ -821,3 +821,221 @@ export async function saveSearchResults(
 
   return !error
 }
+
+// =====================================================
+// AI COACHING FOR MANAGERS
+// =====================================================
+
+export interface CoachingImprovementArea {
+  area: string
+  priority: 'high' | 'medium' | 'low'
+  tip: string
+}
+
+export interface CoachingTipsResult {
+  strengths: string[]
+  improvement_areas: CoachingImprovementArea[]
+  quick_wins: string[]
+  summary: string
+}
+
+export interface PerformanceData {
+  userId: string
+  userName: string
+  leadsCount: number
+  contactedCount: number
+  closingsCount: number
+  revenue: number
+  conversionRate: number
+  avgResponseTimeHours: number | null
+  slaMetPercentage: number | null
+  slaBreached: number
+  leadsBySource: { source: string; count: number; closings: number }[]
+  leadsBySector: { sector: string; count: number; closings: number }[]
+  monthlyLeadTarget?: number
+  monthlyClosingTarget?: number
+  leadProgress?: number
+  closingProgress?: number
+}
+
+// Generate coaching tips for a sales rep
+export async function generateCoachingTips(
+  performanceData: PerformanceData,
+  teamId: string
+): Promise<CoachingTipsResult> {
+  const apiKey = await getApiKey(teamId)
+
+  if (!apiKey) {
+    throw new Error('Cle API OpenAI non configuree. Allez dans Parametres > Integrations.')
+  }
+
+  // Build performance context for AI
+  const performanceContext = buildPerformanceContext(performanceData)
+
+  const systemPrompt = `Tu es un coach commercial expert. Analyse les performances d'un commercial et genere des conseils de coaching personnalises.
+
+Retourne un JSON avec:
+- strengths: tableau de 2-4 points forts identifies (ex: "Excellent taux de conversion sur le secteur Tech")
+- improvement_areas: tableau de 2-4 axes d'amelioration avec:
+  - area: le domaine a ameliorer
+  - priority: "high" | "medium" | "low" selon l'urgence
+  - tip: conseil actionnable et specifique
+- quick_wins: tableau de 2-3 actions rapides a mettre en place immediatement
+- summary: resume en 1-2 phrases du profil du commercial
+
+Sois specifique et base-toi sur les donnees fournies. Evite les conseils generiques.
+Retourne UNIQUEMENT le JSON, sans markdown.`
+
+  const { content } = await callOpenAI(
+    [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `Analyse les performances de ce commercial et genere des conseils de coaching:\n\n${performanceContext}` },
+    ],
+    { apiKey }
+  )
+
+  try {
+    const cleanJson = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+    return JSON.parse(cleanJson)
+  } catch {
+    return {
+      strengths: ['Donnees insuffisantes pour identifier les points forts'],
+      improvement_areas: [
+        {
+          area: 'Collecte de donnees',
+          priority: 'high' as const,
+          tip: 'Utilise l\'application regulierement pour avoir des analyses pertinentes'
+        }
+      ],
+      quick_wins: ['Mettre a jour le statut des leads apres chaque interaction'],
+      summary: 'Pas assez de donnees pour une analyse complete.'
+    }
+  }
+}
+
+// Build performance context for AI analysis
+function buildPerformanceContext(data: PerformanceData): string {
+  const parts: string[] = []
+
+  parts.push(`=== COMMERCIAL: ${data.userName} ===`)
+  parts.push('')
+  parts.push('--- METRIQUES GLOBALES ---')
+  parts.push(`Leads traites: ${data.leadsCount}`)
+  parts.push(`Leads contactes: ${data.contactedCount} (${data.leadsCount > 0 ? ((data.contactedCount / data.leadsCount) * 100).toFixed(1) : 0}%)`)
+  parts.push(`Closings: ${data.closingsCount}`)
+  parts.push(`Taux de conversion: ${data.conversionRate.toFixed(1)}%`)
+  parts.push(`CA genere: ${data.revenue.toLocaleString('fr-FR')} EUR`)
+
+  if (data.monthlyLeadTarget && data.monthlyLeadTarget > 0) {
+    parts.push('')
+    parts.push('--- OBJECTIFS MENSUELS ---')
+    parts.push(`Objectif leads: ${data.leadsCount} / ${data.monthlyLeadTarget} (${data.leadProgress || 0}%)`)
+    if (data.monthlyClosingTarget && data.monthlyClosingTarget > 0) {
+      parts.push(`Objectif closings: ${data.closingsCount} / ${data.monthlyClosingTarget} (${data.closingProgress || 0}%)`)
+    }
+  }
+
+  parts.push('')
+  parts.push('--- REACTIVITE ---')
+  if (data.avgResponseTimeHours !== null) {
+    if (data.avgResponseTimeHours < 1) {
+      parts.push(`Temps moyen de reponse: ${Math.round(data.avgResponseTimeHours * 60)} minutes`)
+    } else if (data.avgResponseTimeHours < 24) {
+      parts.push(`Temps moyen de reponse: ${data.avgResponseTimeHours.toFixed(1)} heures`)
+    } else {
+      parts.push(`Temps moyen de reponse: ${(data.avgResponseTimeHours / 24).toFixed(1)} jours`)
+    }
+  } else {
+    parts.push('Temps moyen de reponse: Non mesure')
+  }
+
+  if (data.slaMetPercentage !== null) {
+    parts.push(`SLA respectes: ${data.slaMetPercentage.toFixed(0)}%`)
+    if (data.slaBreached > 0) {
+      parts.push(`SLA depasses: ${data.slaBreached}`)
+    }
+  }
+
+  if (data.leadsBySource.length > 0) {
+    parts.push('')
+    parts.push('--- PERFORMANCE PAR SOURCE ---')
+    data.leadsBySource
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5)
+      .forEach(s => {
+        const convRate = s.count > 0 ? ((s.closings / s.count) * 100).toFixed(0) : 0
+        parts.push(`${s.source}: ${s.count} leads, ${s.closings} closings (${convRate}% conv.)`)
+      })
+  }
+
+  if (data.leadsBySector.length > 0) {
+    parts.push('')
+    parts.push('--- PERFORMANCE PAR SECTEUR ---')
+    data.leadsBySector
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5)
+      .forEach(s => {
+        const convRate = s.count > 0 ? ((s.closings / s.count) * 100).toFixed(0) : 0
+        parts.push(`${s.sector}: ${s.count} leads, ${s.closings} closings (${convRate}% conv.)`)
+      })
+  }
+
+  return parts.join('\n')
+}
+
+// Save coaching tips to user_performance_profiles
+export async function saveCoachingTips(
+  userId: string,
+  tips: CoachingTipsResult
+): Promise<boolean> {
+  // First check if profile exists
+  const { data: existingProfile } = await supabase
+    .from('user_performance_profiles')
+    .select('id')
+    .eq('user_id', userId)
+    .single()
+
+  const coachingData = {
+    coaching_strengths: tips.strengths,
+    improvement_areas: tips.improvement_areas,
+    coaching_quick_wins: tips.quick_wins,
+    ai_coaching_tips: [tips.summary],
+    coaching_generated_at: new Date().toISOString(),
+  }
+
+  if (existingProfile) {
+    const { error } = await supabase
+      .from('user_performance_profiles')
+      .update(coachingData)
+      .eq('user_id', userId)
+    return !error
+  } else {
+    const { error } = await supabase
+      .from('user_performance_profiles')
+      .insert({
+        user_id: userId,
+        ...coachingData,
+      })
+    return !error
+  }
+}
+
+// Get coaching tips for a user
+export async function getCoachingTips(userId: string): Promise<CoachingTipsResult | null> {
+  const { data, error } = await supabase
+    .from('user_performance_profiles')
+    .select('coaching_strengths, improvement_areas, coaching_quick_wins, ai_coaching_tips, coaching_generated_at')
+    .eq('user_id', userId)
+    .single()
+
+  if (error || !data) return null
+
+  if (!data.coaching_generated_at) return null
+
+  return {
+    strengths: data.coaching_strengths || [],
+    improvement_areas: data.improvement_areas || [],
+    quick_wins: data.coaching_quick_wins || [],
+    summary: data.ai_coaching_tips?.[0] || '',
+  }
+}

@@ -19,6 +19,8 @@ import AIHistoryTimeline from './AIHistoryTimeline'
 interface AIPanelProps {
   lead: Lead
   onLeadUpdate: () => void
+  onSearchLead?: () => void
+  searching?: boolean
 }
 
 type ScriptType = 'phone_call' | 'email_intro' | 'email_followup' | 'linkedin_message'
@@ -30,7 +32,7 @@ const SCRIPT_TYPES: { value: ScriptType; label: string; icon: string }[] = [
   { value: 'linkedin_message', label: 'Message LinkedIn', icon: '💼' },
 ]
 
-export default function AIPanel({ lead, onLeadUpdate }: AIPanelProps) {
+export default function AIPanel({ lead, onLeadUpdate, onSearchLead, searching = false }: AIPanelProps) {
   const { profile } = useAuthStore()
   const {
     analyzing,
@@ -229,15 +231,28 @@ export default function AIPanel({ lead, onLeadUpdate }: AIPanelProps) {
             <span className="text-xl">🤖</span>
             Insights IA
           </h3>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => handleAnalyze(lead.ai_analyzed)}
-            disabled={analyzing}
-            className="border-indigo-300 text-indigo-700 hover:bg-indigo-100"
-          >
-            {analyzing ? '⏳ Analyse...' : '🔄 Recalculer le score'}
-          </Button>
+          <div className="flex items-center gap-2">
+            {onSearchLead && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onSearchLead}
+                disabled={searching}
+                className="border-indigo-300 text-indigo-700 hover:bg-indigo-100"
+              >
+                {searching ? '⏳ Recherche...' : '🔍 Rechercher ce lead'}
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleAnalyze(lead.ai_analyzed)}
+              disabled={analyzing}
+              className="border-indigo-300 text-indigo-700 hover:bg-indigo-100"
+            >
+              {analyzing ? '⏳ Analyse...' : '🔄 Recalculer le score'}
+            </Button>
+          </div>
         </div>
 
         {lead.ai_analyzed ? (

@@ -1,6 +1,16 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../stores/authStore'
+import {
+  createGoogleEvent,
+  updateGoogleEvent,
+  deleteGoogleEvent,
+} from '../services/googleCalendarService'
+import {
+  createOutlookEvent,
+  updateOutlookEvent,
+  deleteOutlookEvent,
+} from '../services/outlookCalendarService'
 import type { Meeting, MeetingFormData, MeetingOutcomeData } from '../types/meetings'
 
 export function useMeetings() {
@@ -41,8 +51,34 @@ export function useMeetings() {
     fetchMeetings()
   }, [fetchMeetings])
 
+  // Check if user has Google Calendar connected
+  const checkGoogleCalendarConnected = async (): Promise<boolean> => {
+    if (!profile?.id) return false
+
+    const { data } = await supabase
+      .from('users')
+      .select('google_calendar_connected')
+      .eq('id', profile.id)
+      .single()
+
+    return data?.google_calendar_connected || false
+  }
+
+  // Check if user has Outlook Calendar connected
+  const checkOutlookConnected = async (): Promise<boolean> => {
+    if (!profile?.id) return false
+
+    const { data } = await supabase
+      .from('users')
+      .select('outlook_connected')
+      .eq('id', profile.id)
+      .single()
+
+    return data?.outlook_connected || false
+  }
+
   // Create a new meeting
-  const createMeeting = async (data: MeetingFormData): Promise<Meeting | null> => {
+  const createMeeting = async (data: MeetingFormData, syncToCalendars: boolean = true): Promise<Meeting | null> => {
     if (!profile?.team_id) return null
 
     try {
@@ -69,6 +105,44 @@ export function useMeetings() {
         description: `RDV planifié: ${data.title}`,
       })
 
+      // Sync to calendars if enabled
+      if (syncToCalendars) {
+        const leadEmail = newMeeting.lead?.email
+        const isVideoCall = data.type === 'video'
+
+        // Sync to Google Calendar if connected
+        const isGoogleConnected = await checkGoogleCalendarConnected()
+        if (isGoogleConnected) {
+          const googleResult = await createGoogleEvent(newMeeting, profile.id, leadEmail, isVideoCall)
+
+          if (googleResult.eventId) {
+            newMeeting.google_event_id = googleResult.eventId
+            newMeeting.google_calendar_synced = true
+            if (googleResult.meetLink) {
+              newMeeting.google_meet_link = googleResult.meetLink
+              if (!newMeeting.location) {
+                newMeeting.location = googleResult.meetLink
+              }
+            }
+          }
+        }
+
+        // Sync to Outlook Calendar if connected
+        const isOutlookConnected = await checkOutlookConnected()
+        if (isOutlookConnected) {
+          const outlookResult = await createOutlookEvent(newMeeting, profile.id, leadEmail, isVideoCall)
+
+          if (outlookResult.eventId) {
+            newMeeting.outlook_event_id = outlookResult.eventId
+            newMeeting.outlook_calendar_synced = true
+            if (outlookResult.teamsLink && !newMeeting.location) {
+              newMeeting.outlook_teams_link = outlookResult.teamsLink
+              newMeeting.location = outlookResult.teamsLink
+            }
+          }
+        }
+      }
+
       setMeetings(prev => [...prev, newMeeting].sort(
         (a, b) => new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime()
       ))
@@ -93,6 +167,26 @@ export function useMeetings() {
         .eq('id', id)
 
       if (error) throw error
+
+      const meeting = meetings.find(m => m.id === id)
+      const updatedMeeting = { ...meeting, ...data } as Meeting
+      const leadEmail = meeting?.lead?.email
+
+      // Sync update to Google Calendar if connected
+      if (meeting?.google_event_id && profile?.id) {
+        const isGoogleConnected = await checkGoogleCalendarConnected()
+        if (isGoogleConnected) {
+          await updateGoogleEvent(updatedMeeting, profile.id, leadEmail)
+        }
+      }
+
+      // Sync update to Outlook Calendar if connected
+      if (meeting?.outlook_event_id && profile?.id) {
+        const isOutlookConnected = await checkOutlookConnected()
+        if (isOutlookConnected) {
+          await updateOutlookEvent(updatedMeeting, profile.id, leadEmail)
+        }
+      }
 
       setMeetings(prev =>
         prev.map(m => (m.id === id ? { ...m, ...data, updated_at: new Date().toISOString() } : m))
@@ -251,6 +345,24 @@ export function useMeetings() {
   // Delete a meeting
   const deleteMeeting = async (id: string): Promise<boolean> => {
     try {
+      const meeting = meetings.find(m => m.id === id)
+
+      // Delete from Google Calendar first if synced
+      if (meeting?.google_event_id && profile?.id) {
+        const isGoogleConnected = await checkGoogleCalendarConnected()
+        if (isGoogleConnected) {
+          await deleteGoogleEvent(meeting.google_event_id, profile.id)
+        }
+      }
+
+      // Delete from Outlook Calendar if synced
+      if (meeting?.outlook_event_id && profile?.id) {
+        const isOutlookConnected = await checkOutlookConnected()
+        if (isOutlookConnected) {
+          await deleteOutlookEvent(meeting.outlook_event_id, profile.id)
+        }
+      }
+
       const { error } = await supabase
         .from('meetings')
         .delete()

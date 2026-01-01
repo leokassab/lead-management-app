@@ -28,7 +28,11 @@ export interface Meeting {
   reminder_sms_lead: boolean
 
   google_event_id?: string
+  google_calendar_synced?: boolean
+  google_meet_link?: string
   outlook_event_id?: string
+  outlook_calendar_synced?: boolean
+  outlook_teams_link?: string
 
   notes?: string
   outcome?: string

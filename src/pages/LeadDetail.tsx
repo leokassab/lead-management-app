@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Button, Badge, Avatar, Modal, Input, Select } from '../components/ui'
 import AIPanel from '../components/leads/AIPanel'
 import { LostReasonModal, LeadSequenceSection } from '../components/leads'
+import ActionSelector from '../components/actions/ActionSelector'
 import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../stores/authStore'
 import { formatDateTime, formatDate } from '../utils/formatters'
@@ -12,7 +13,7 @@ import { useLeadMeetings } from '../hooks/useMeetings'
 import { enrichAndSaveLead } from '../services/enrichmentService'
 import { generateSearchQueries, saveSearchResults, type SearchSuggestionsResult } from '../services/ai'
 import { MEETING_TYPE_LABELS, MEETING_STATUS_LABELS } from '../types/meetings'
-import type { Lead, CustomStatus, Activity, User } from '../types'
+import type { Lead, CustomStatus, Activity, User, LeadAction } from '../types'
 
 export default function LeadDetail() {
   const { id } = useParams<{ id: string }>()
@@ -52,13 +53,7 @@ export default function LeadDetail() {
   // Lead meetings
   const { meetings: leadMeetings } = useLeadMeetings(id)
 
-  useEffect(() => {
-    if (id && profile?.team_id) {
-      fetchData()
-    }
-  }, [id, profile])
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     if (!id || !profile?.team_id) return
 
     setLoading(true)
@@ -111,7 +106,13 @@ export default function LeadDetail() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [id, profile])
+
+  useEffect(() => {
+    if (id && profile?.team_id) {
+      fetchData()
+    }
+  }, [id, profile, fetchData])
 
   const handleStatusChange = async (newStatus: string) => {
     if (!lead) return
@@ -272,6 +273,42 @@ export default function LeadDetail() {
     }
   }
 
+  const handleActionChange = async (action: LeadAction, date?: string, note?: string) => {
+    if (!lead) return
+
+    try {
+      const { error } = await supabase
+        .from('leads')
+        .update({
+          current_action: action,
+          current_action_date: date || null,
+          current_action_note: note || null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', lead.id)
+
+      if (error) throw error
+
+      // Add activity
+      await supabase.from('activities').insert({
+        lead_id: lead.id,
+        user_id: profile?.id,
+        activity_type: 'action_change',
+        description: `Action définie: ${action}${date ? ` pour le ${formatDate(date)}` : ''}`,
+      })
+
+      setLead({
+        ...lead,
+        current_action: action,
+        current_action_date: date,
+        current_action_note: note,
+      })
+      fetchData()
+    } catch (error) {
+      console.error('Error updating action:', error)
+    }
+  }
+
   const handleEnrichLead = async () => {
     if (!lead) return
 
@@ -417,6 +454,15 @@ export default function LeadDetail() {
               </div>
             )}
 
+            {/* Action Selector */}
+            <ActionSelector
+              value={lead.current_action}
+              actionDate={lead.current_action_date}
+              actionNote={lead.current_action_note}
+              onChange={handleActionChange}
+            />
+
+            {/* Status Dropdown */}
             <select
               value={lead.status}
               onChange={(e) => handleStatusChange(e.target.value)}
@@ -594,54 +640,6 @@ export default function LeadDetail() {
             )}
           </section>
 
-          {/* RDV */}
-          {leadMeetings.length > 0 && (
-            <section className="bg-white rounded-lg shadow p-6">
-              <h2 className="text-lg font-semibold mb-4">📅 Rendez-vous</h2>
-              <div className="space-y-3">
-                {leadMeetings.map(meeting => {
-                  const statusConfig = MEETING_STATUS_LABELS[meeting.status]
-                  const typeConfig = MEETING_TYPE_LABELS[meeting.type]
-                  const isNoShow = meeting.status === 'no_show'
-
-                  return (
-                    <div
-                      key={meeting.id}
-                      className={`p-4 rounded-lg border ${
-                        isNoShow ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between">
-                        <div className="flex items-center gap-3">
-                          <span className="text-xl">{typeConfig.icon}</span>
-                          <div>
-                            <div className={`font-medium ${isNoShow ? 'text-red-800' : 'text-gray-900'}`}>
-                              {meeting.title}
-                            </div>
-                            <div className={`text-sm ${isNoShow ? 'text-red-600' : 'text-gray-500'}`}>
-                              {formatDateTime(meeting.scheduled_at)} • {meeting.duration_minutes} min
-                            </div>
-                          </div>
-                        </div>
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusConfig.color}`}>
-                          {isNoShow && '❌ '}{statusConfig.label}
-                        </span>
-                      </div>
-                      {meeting.outcome && (
-                        <div className="mt-2 text-sm text-gray-600">
-                          <span className="font-medium">Résultat:</span> {meeting.outcome}
-                        </div>
-                      )}
-                      {meeting.notes && (
-                        <div className="mt-1 text-sm text-gray-500">{meeting.notes}</div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            </section>
-          )}
-
           {/* Historique & Commentaires */}
           <section className="bg-white rounded-lg shadow p-6">
             <h2 className="text-lg font-semibold mb-4">💬 Historique & Commentaires</h2>
@@ -696,7 +694,12 @@ export default function LeadDetail() {
 
           {/* AI Tab */}
           {activeTab === 'ai' && (
-            <AIPanel lead={lead} onLeadUpdate={fetchData} />
+            <AIPanel
+              lead={lead}
+              onLeadUpdate={fetchData}
+              onSearchLead={handleSearchLead}
+              searching={searching}
+            />
           )}
         </div>
 
@@ -759,6 +762,81 @@ export default function LeadDetail() {
 
           {/* Séquence */}
           <LeadSequenceSection leadId={lead.id} />
+
+          {/* RDV */}
+          <section className="bg-white rounded-lg shadow p-6">
+            <h2 className="text-lg font-semibold mb-4">📅 Rendez-vous</h2>
+            {leadMeetings.length > 0 ? (
+              <div className="space-y-3">
+                {/* Prochain RDV */}
+                {(() => {
+                  const upcomingMeeting = leadMeetings.find(m =>
+                    (m.status === 'scheduled' || m.status === 'confirmed') &&
+                    new Date(m.scheduled_at) >= new Date()
+                  )
+                  if (upcomingMeeting) {
+                    const typeConfig = MEETING_TYPE_LABELS[upcomingMeeting.type]
+                    return (
+                      <div className="p-3 bg-blue-50 rounded-lg border border-blue-200">
+                        <div className="text-xs font-medium text-blue-600 mb-1">Prochain RDV</div>
+                        <div className="flex items-center gap-2">
+                          <span>{typeConfig.icon}</span>
+                          <div>
+                            <div className="font-medium text-gray-900">{upcomingMeeting.title}</div>
+                            <div className="text-sm text-gray-600">
+                              {formatDateTime(upcomingMeeting.scheduled_at)}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  }
+                  return null
+                })()}
+
+                {/* Historique RDV */}
+                <div>
+                  <div className="text-sm font-medium text-gray-500 mb-2">Historique</div>
+                  <div className="space-y-2 max-h-48 overflow-y-auto">
+                    {leadMeetings.map(meeting => {
+                      const statusConfig = MEETING_STATUS_LABELS[meeting.status]
+                      const typeConfig = MEETING_TYPE_LABELS[meeting.type]
+                      const isNoShow = meeting.status === 'no_show'
+
+                      return (
+                        <div
+                          key={meeting.id}
+                          className={`p-2 rounded border text-sm ${
+                            isNoShow ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <span>{typeConfig.icon}</span>
+                              <span className={isNoShow ? 'text-red-800' : 'text-gray-900'}>
+                                {meeting.title}
+                              </span>
+                            </div>
+                            <span className={`px-1.5 py-0.5 rounded text-xs ${statusConfig.color}`}>
+                              {isNoShow && '❌ '}{statusConfig.label}
+                            </span>
+                          </div>
+                          <div className={`text-xs mt-1 ${isNoShow ? 'text-red-600' : 'text-gray-500'}`}>
+                            {formatDateTime(meeting.scheduled_at)}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="text-center text-gray-500 py-4">
+                <div className="text-2xl mb-2">📅</div>
+                <p className="text-sm">Aucun RDV planifié</p>
+              </div>
+            )}
+          </section>
 
           {/* Prochaine action */}
           <section className="bg-white rounded-lg shadow p-6">

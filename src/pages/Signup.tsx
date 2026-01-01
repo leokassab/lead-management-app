@@ -95,8 +95,8 @@ export default function Signup() {
         navigate('/login', { state: { message: 'Compte créé avec succès ! Vérifiez votre email pour confirmer.' } })
       }
 
-    } catch (err: any) {
-      setError(err.message || 'Une erreur est survenue')
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Une erreur est survenue')
     } finally {
       setLoading(false)
     }

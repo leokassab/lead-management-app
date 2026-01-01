@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
 import { useAuthStore } from '../../stores/authStore'
@@ -13,13 +13,7 @@ export default function NotificationBell() {
 
   const unreadCount = notifications.filter(n => !n.read).length
 
-  useEffect(() => {
-    if (profile) {
-      fetchNotifications()
-    }
-  }, [profile])
-
-  const fetchNotifications = async () => {
+  const fetchNotifications = useCallback(async () => {
     if (!profile) return
 
     setLoading(true)
@@ -38,7 +32,13 @@ export default function NotificationBell() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [profile])
+
+  useEffect(() => {
+    if (profile) {
+      fetchNotifications()
+    }
+  }, [profile, fetchNotifications])
 
   const markAsRead = async (id: string) => {
     try {
@@ -96,6 +96,10 @@ export default function NotificationBell() {
         return '⏰'
       case 'email_reply':
         return '📧'
+      case 'sla_warning':
+        return '⚠️'
+      case 'sla_breach':
+        return '🚨'
       default:
         return '🔔'
     }

@@ -1,8 +1,21 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Button, Avatar, Input, Select, Modal, Badge } from '../components/ui'
 import { useAuthStore } from '../stores/authStore'
 import { supabase } from '../lib/supabase'
 import { getTeamAIConfig, updateTeamAIConfig } from '../services/ai'
+import {
+  initGoogleAuth,
+  handleGoogleCallback,
+  disconnectGoogleCalendar,
+  isGoogleCalendarConfigured,
+} from '../services/googleCalendarService'
+import {
+  initOutlookAuth,
+  handleOutlookCallback,
+  disconnectOutlookCalendar,
+  isOutlookCalendarConfigured,
+} from '../services/outlookCalendarService'
 import type { CustomStatus, User, AssignmentRule, Team, AIConfig } from '../types'
 import { DEFAULT_AI_CONFIG } from '../types'
 
@@ -29,7 +42,11 @@ const DEFAULT_COLORS = [
 
 export default function Settings() {
   const { profile, fetchProfile } = useAuthStore()
-  const [activeTab, setActiveTab] = useState<Tab>('profile')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [activeTab, setActiveTab] = useState<Tab>(() => {
+    const tab = searchParams.get('tab')
+    return (tab as Tab) || 'profile'
+  })
   const [teamMembers, setTeamMembers] = useState<User[]>([])
   const [customStatuses, setCustomStatuses] = useState<CustomStatus[]>([])
   const [assignmentRules, setAssignmentRules] = useState<AssignmentRule[]>([])
@@ -77,21 +94,17 @@ export default function Settings() {
   const [aiConfig, setAIConfig] = useState<AIConfig>(DEFAULT_AI_CONFIG)
   const [aiConfigSaving, setAIConfigSaving] = useState(false)
 
-  useEffect(() => {
-    if (profile) {
-      setProfileForm({
-        first_name: profile.first_name || '',
-        last_name: profile.last_name || '',
-        email: profile.email || '',
-        timezone: 'Europe/Paris',
-      })
-      if (profile.team_id) {
-        fetchData()
-      }
-    }
-  }, [profile])
+  // Google Calendar
+  const [googleCalendarConnected, setGoogleCalendarConnected] = useState(false)
+  const [googleCalendarEmail, setGoogleCalendarEmail] = useState<string | null>(null)
+  const [googleConnecting, setGoogleConnecting] = useState(false)
 
-  const fetchData = async () => {
+  // Outlook Calendar
+  const [outlookConnected, setOutlookConnected] = useState(false)
+  const [outlookEmail, setOutlookEmail] = useState<string | null>(null)
+  const [outlookConnecting, setOutlookConnecting] = useState(false)
+
+  const fetchData = useCallback(async () => {
     if (!profile?.team_id) return
 
     setLoading(true)
@@ -131,7 +144,81 @@ export default function Settings() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [profile])
+
+  useEffect(() => {
+    if (profile) {
+      setProfileForm({
+        first_name: profile.first_name || '',
+        last_name: profile.last_name || '',
+        email: profile.email || '',
+        timezone: 'Europe/Paris',
+      })
+      if (profile.team_id) {
+        fetchData()
+      }
+    }
+  }, [profile, fetchData])
+
+  // Handle OAuth callbacks (Google and Outlook)
+  useEffect(() => {
+    const code = searchParams.get('code')
+    const state = searchParams.get('state')
+
+    if (code && profile?.id) {
+      setActiveTab('integrations')
+
+      // Check if this is an Outlook callback (state starts with "outlook_")
+      if (state?.startsWith('outlook_')) {
+        setOutlookConnecting(true)
+        handleOutlookCallback(code, profile.id).then((result) => {
+          if (result.success) {
+            setOutlookConnected(true)
+            setOutlookEmail(result.email || null)
+          } else {
+            alert(`Erreur de connexion Outlook: ${result.error}`)
+          }
+          setOutlookConnecting(false)
+          setSearchParams({})
+        })
+      } else {
+        // Google callback
+        setGoogleConnecting(true)
+        handleGoogleCallback(code, profile.id).then((result) => {
+          if (result.success) {
+            setGoogleCalendarConnected(true)
+            setGoogleCalendarEmail(result.email || null)
+          } else {
+            alert(`Erreur de connexion Google: ${result.error}`)
+          }
+          setGoogleConnecting(false)
+          setSearchParams({})
+        })
+      }
+    }
+  }, [searchParams, profile?.id, setSearchParams])
+
+  // Load calendar connection statuses
+  useEffect(() => {
+    const loadCalendarStatuses = async () => {
+      if (!profile?.id) return
+
+      const { data } = await supabase
+        .from('users')
+        .select('google_calendar_connected, google_calendar_email, outlook_connected, outlook_email')
+        .eq('id', profile.id)
+        .single()
+
+      if (data) {
+        setGoogleCalendarConnected(data.google_calendar_connected || false)
+        setGoogleCalendarEmail(data.google_calendar_email || null)
+        setOutlookConnected(data.outlook_connected || false)
+        setOutlookEmail(data.outlook_email || null)
+      }
+    }
+
+    loadCalendarStatuses()
+  }, [profile?.id])
 
   // Profile handlers
   const handleSaveProfile = async () => {
@@ -203,6 +290,25 @@ export default function Settings() {
     } catch (err) {
       console.error('Error removing member:', err)
       alert('Erreur lors de la suppression')
+    }
+  }
+
+  const handleUpdateMemberTargets = async (memberId: string, field: 'monthly_lead_target' | 'monthly_closing_target', value: number) => {
+    try {
+      const { error } = await supabase
+        .from('users')
+        .update({ [field]: value })
+        .eq('id', memberId)
+
+      if (error) throw error
+
+      // Update local state
+      setTeamMembers(prev =>
+        prev.map(m => m.id === memberId ? { ...m, [field]: value } : m)
+      )
+    } catch (err) {
+      console.error('Error updating member targets:', err)
+      alert('Erreur lors de la mise à jour')
     }
   }
 
@@ -370,6 +476,50 @@ export default function Settings() {
     setApiKey(key)
   }
 
+  // Google Calendar handlers
+  const handleConnectGoogle = () => {
+    if (!isGoogleCalendarConfigured()) {
+      alert('Google Calendar n\'est pas configuré. Contactez l\'administrateur.')
+      return
+    }
+    initGoogleAuth()
+  }
+
+  const handleDisconnectGoogle = async () => {
+    if (!profile?.id) return
+    if (!confirm('Êtes-vous sûr de vouloir déconnecter Google Calendar ?')) return
+
+    const success = await disconnectGoogleCalendar(profile.id)
+    if (success) {
+      setGoogleCalendarConnected(false)
+      setGoogleCalendarEmail(null)
+    } else {
+      alert('Erreur lors de la déconnexion')
+    }
+  }
+
+  // Outlook Calendar handlers
+  const handleConnectOutlook = () => {
+    if (!isOutlookCalendarConfigured()) {
+      alert('Outlook Calendar n\'est pas configuré. Contactez l\'administrateur.')
+      return
+    }
+    initOutlookAuth()
+  }
+
+  const handleDisconnectOutlook = async () => {
+    if (!profile?.id) return
+    if (!confirm('Êtes-vous sûr de vouloir déconnecter Outlook Calendar ?')) return
+
+    const success = await disconnectOutlookCalendar(profile.id)
+    if (success) {
+      setOutlookConnected(false)
+      setOutlookEmail(null)
+    } else {
+      alert('Erreur lors de la déconnexion')
+    }
+  }
+
   const tabs = [
     { id: 'profile' as Tab, label: '👤 Profil', show: true },
     { id: 'team' as Tab, label: '👥 Équipe', show: profile?.role === 'admin' || profile?.role === 'manager' },
@@ -492,62 +642,101 @@ export default function Settings() {
                 {loading ? (
                   <div className="text-center py-8 text-gray-500">Chargement...</div>
                 ) : (
-                  <table className="w-full">
-                    <thead>
-                      <tr className="border-b">
-                        <th className="p-3 text-left text-sm font-medium text-gray-600">Membre</th>
-                        <th className="p-3 text-left text-sm font-medium text-gray-600">Email</th>
-                        <th className="p-3 text-left text-sm font-medium text-gray-600">Rôle</th>
-                        <th className="p-3 text-left text-sm font-medium text-gray-600">Leads actifs</th>
-                        <th className="p-3"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {teamMembers.map(member => (
-                        <tr key={member.id} className="border-b hover:bg-gray-50">
-                          <td className="p-3">
-                            <div className="flex items-center gap-3">
-                              <Avatar src={member.avatar_url} alt={`${member.first_name} ${member.last_name}`} size="sm" />
-                              <div>
-                                <span className="font-medium">{member.first_name} {member.last_name}</span>
-                                {member.id === profile?.id && (
-                                  <span className="ml-2 text-xs text-gray-400">(vous)</span>
-                                )}
-                              </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead>
+                        <tr className="border-b">
+                          <th className="p-3 text-left text-sm font-medium text-gray-600">Membre</th>
+                          <th className="p-3 text-left text-sm font-medium text-gray-600">Rôle</th>
+                          <th className="p-3 text-left text-sm font-medium text-gray-600">Leads actifs</th>
+                          <th className="p-3 text-left text-sm font-medium text-gray-600">
+                            <div className="flex items-center gap-1">
+                              🎯 Obj. Leads/mois
                             </div>
-                          </td>
-                          <td className="p-3 text-sm text-gray-600">{member.email}</td>
-                          <td className="p-3">
-                            {profile?.role === 'admin' && member.id !== profile?.id ? (
-                              <select
-                                value={member.role}
-                                onChange={(e) => handleUpdateMemberRole(member.id, e.target.value)}
-                                className="text-sm border rounded px-2 py-1"
-                              >
-                                {ROLE_OPTIONS.map(opt => (
-                                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                                ))}
-                              </select>
-                            ) : (
-                              <span className="text-sm">{roleLabels[member.role]}</span>
-                            )}
-                          </td>
-                          <td className="p-3 text-sm">{member.active_leads_count}</td>
-                          <td className="p-3">
-                            {member.id !== profile?.id && profile?.role === 'admin' && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => handleRemoveMember(member.id)}
-                              >
-                                ❌
-                              </Button>
-                            )}
-                          </td>
+                          </th>
+                          <th className="p-3 text-left text-sm font-medium text-gray-600">
+                            <div className="flex items-center gap-1">
+                              💰 Obj. Closings/mois
+                            </div>
+                          </th>
+                          <th className="p-3"></th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {teamMembers.map(member => (
+                          <tr key={member.id} className="border-b hover:bg-gray-50">
+                            <td className="p-3">
+                              <div className="flex items-center gap-3">
+                                <Avatar src={member.avatar_url} alt={`${member.first_name} ${member.last_name}`} size="sm" />
+                                <div>
+                                  <span className="font-medium">{member.first_name} {member.last_name}</span>
+                                  {member.id === profile?.id && (
+                                    <span className="ml-2 text-xs text-gray-400">(vous)</span>
+                                  )}
+                                  <div className="text-xs text-gray-500">{member.email}</div>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="p-3">
+                              {profile?.role === 'admin' && member.id !== profile?.id ? (
+                                <select
+                                  value={member.role}
+                                  onChange={(e) => handleUpdateMemberRole(member.id, e.target.value)}
+                                  className="text-sm border rounded px-2 py-1"
+                                >
+                                  {ROLE_OPTIONS.map(opt => (
+                                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <span className="text-sm">{roleLabels[member.role]}</span>
+                              )}
+                            </td>
+                            <td className="p-3 text-sm">{member.active_leads_count}</td>
+                            <td className="p-3">
+                              {(profile?.role === 'admin' || profile?.role === 'manager') ? (
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={member.monthly_lead_target || ''}
+                                  onChange={(e) => handleUpdateMemberTargets(member.id, 'monthly_lead_target', parseInt(e.target.value) || 0)}
+                                  placeholder="0"
+                                  className="w-20 text-sm border rounded px-2 py-1 text-center"
+                                />
+                              ) : (
+                                <span className="text-sm">{member.monthly_lead_target || '-'}</span>
+                              )}
+                            </td>
+                            <td className="p-3">
+                              {(profile?.role === 'admin' || profile?.role === 'manager') ? (
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={member.monthly_closing_target || ''}
+                                  onChange={(e) => handleUpdateMemberTargets(member.id, 'monthly_closing_target', parseInt(e.target.value) || 0)}
+                                  placeholder="0"
+                                  className="w-20 text-sm border rounded px-2 py-1 text-center"
+                                />
+                              ) : (
+                                <span className="text-sm">{member.monthly_closing_target || '-'}</span>
+                              )}
+                            </td>
+                            <td className="p-3">
+                              {member.id !== profile?.id && profile?.role === 'admin' && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => handleRemoveMember(member.id)}
+                                >
+                                  ❌
+                                </Button>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 )}
               </div>
             )}
@@ -916,6 +1105,134 @@ export default function Settings() {
                       Connecter
                     </Button>
                   </div>
+                </div>
+
+                {/* Google Calendar Integration */}
+                <div className="bg-white rounded-lg shadow p-6">
+                  <div className="flex items-center gap-3 mb-2">
+                    <span className="text-2xl">📅</span>
+                    <h2 className="text-lg font-semibold">Google Calendar</h2>
+                    <Badge variant={googleCalendarConnected ? 'success' : 'default'}>
+                      {googleCalendarConnected ? '✅ Connecté' : 'Non connecté'}
+                    </Badge>
+                  </div>
+                  <p className="text-sm text-gray-500 mb-4">
+                    Synchronisez vos rendez-vous avec Google Calendar et créez automatiquement des liens Google Meet
+                  </p>
+
+                  {googleConnecting ? (
+                    <div className="flex items-center gap-3 p-4 bg-blue-50 rounded-lg">
+                      <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
+                      <span className="text-blue-700">Connexion en cours...</span>
+                    </div>
+                  ) : googleCalendarConnected ? (
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between p-4 bg-green-50 rounded-lg border border-green-200">
+                        <div className="flex items-center gap-3">
+                          <span className="text-2xl">✅</span>
+                          <div>
+                            <div className="font-medium text-green-800">Connecté</div>
+                            {googleCalendarEmail && (
+                              <div className="text-sm text-green-600">{googleCalendarEmail}</div>
+                            )}
+                          </div>
+                        </div>
+                        <Button
+                          variant="outline"
+                          onClick={handleDisconnectGoogle}
+                          className="text-red-600 border-red-300 hover:bg-red-50"
+                        >
+                          Déconnecter
+                        </Button>
+                      </div>
+                      <div className="text-sm text-gray-500">
+                        <strong>Fonctionnalités activées :</strong>
+                        <ul className="mt-2 space-y-1 list-disc list-inside">
+                          <li>Sync automatique des RDV vers Google Calendar</li>
+                          <li>Création de liens Google Meet pour les visios</li>
+                          <li>Rappels automatiques par email</li>
+                        </ul>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      <Button onClick={handleConnectGoogle} className="w-full">
+                        <span className="mr-2">🔗</span>
+                        Connecter Google Calendar
+                      </Button>
+                      {!isGoogleCalendarConfigured() && (
+                        <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800">
+                          ⚠️ L'intégration Google Calendar nécessite une configuration OAuth.
+                          Ajoutez <code className="bg-yellow-100 px-1 rounded">VITE_GOOGLE_CLIENT_ID</code> et{' '}
+                          <code className="bg-yellow-100 px-1 rounded">VITE_GOOGLE_CLIENT_SECRET</code> dans votre fichier .env
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Outlook Calendar Integration */}
+                <div className="bg-white rounded-lg shadow p-6">
+                  <div className="flex items-center gap-3 mb-2">
+                    <span className="text-2xl">📆</span>
+                    <h2 className="text-lg font-semibold">Outlook / Microsoft 365</h2>
+                    <Badge variant={outlookConnected ? 'success' : 'default'}>
+                      {outlookConnected ? '✅ Connecté' : 'Non connecté'}
+                    </Badge>
+                  </div>
+                  <p className="text-sm text-gray-500 mb-4">
+                    Synchronisez vos rendez-vous avec Outlook Calendar et créez automatiquement des réunions Teams
+                  </p>
+
+                  {outlookConnecting ? (
+                    <div className="flex items-center gap-3 p-4 bg-blue-50 rounded-lg">
+                      <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
+                      <span className="text-blue-700">Connexion en cours...</span>
+                    </div>
+                  ) : outlookConnected ? (
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between p-4 bg-green-50 rounded-lg border border-green-200">
+                        <div className="flex items-center gap-3">
+                          <span className="text-2xl">✅</span>
+                          <div>
+                            <div className="font-medium text-green-800">Connecté</div>
+                            {outlookEmail && (
+                              <div className="text-sm text-green-600">{outlookEmail}</div>
+                            )}
+                          </div>
+                        </div>
+                        <Button
+                          variant="outline"
+                          onClick={handleDisconnectOutlook}
+                          className="text-red-600 border-red-300 hover:bg-red-50"
+                        >
+                          Déconnecter
+                        </Button>
+                      </div>
+                      <div className="text-sm text-gray-500">
+                        <strong>Fonctionnalités activées :</strong>
+                        <ul className="mt-2 space-y-1 list-disc list-inside">
+                          <li>Sync automatique des RDV vers Outlook Calendar</li>
+                          <li>Création de réunions Microsoft Teams pour les visios</li>
+                          <li>Rappels automatiques</li>
+                        </ul>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      <Button onClick={handleConnectOutlook} className="w-full">
+                        <span className="mr-2">🔗</span>
+                        Connecter Outlook / Microsoft 365
+                      </Button>
+                      {!isOutlookCalendarConfigured() && (
+                        <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800">
+                          ⚠️ L'intégration Outlook nécessite une configuration Azure AD.
+                          Ajoutez <code className="bg-yellow-100 px-1 rounded">VITE_MICROSOFT_CLIENT_ID</code> et{' '}
+                          <code className="bg-yellow-100 px-1 rounded">VITE_MICROSOFT_CLIENT_SECRET</code> dans votre fichier .env
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Webhooks */}

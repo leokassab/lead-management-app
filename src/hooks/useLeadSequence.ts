@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../stores/authStore'
 import type { LeadSequence, Sequence } from '../types/sequences'
@@ -230,6 +230,9 @@ export function useLeadsInSequences(leadIds: string[]) {
   const [sequenceMap, setSequenceMap] = useState<Record<string, boolean>>({})
   const [loading, setLoading] = useState(false)
 
+  // Create a stable key for the dependency array
+  const leadIdsKey = useMemo(() => leadIds.join(','), [leadIds])
+
   useEffect(() => {
     if (leadIds.length === 0) return
 
@@ -257,7 +260,7 @@ export function useLeadsInSequences(leadIds: string[]) {
     }
 
     fetchSequences()
-  }, [leadIds.join(',')])
+  }, [leadIds, leadIdsKey])
 
   return { sequenceMap, loading }
 }

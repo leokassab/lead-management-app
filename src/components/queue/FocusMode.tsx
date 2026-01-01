@@ -20,6 +20,24 @@ export default function FocusMode({ leads, onClose, onUpdateAction }: FocusModeP
   const currentLead = leads[currentIndex]
   const totalLeads = leads.length
 
+  const goNext = useCallback(() => {
+    if (currentIndex < totalLeads - 1) {
+      setCurrentIndex(prev => prev + 1)
+    }
+  }, [currentIndex, totalLeads])
+
+  const goPrev = useCallback(() => {
+    if (currentIndex > 0) {
+      setCurrentIndex(prev => prev - 1)
+    }
+  }, [currentIndex])
+
+  const handleCall = useCallback(() => {
+    if (currentLead?.phone) {
+      window.open(`tel:${currentLead.phone}`, '_self')
+    }
+  }, [currentLead])
+
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -33,7 +51,7 @@ export default function FocusMode({ leads, onClose, onUpdateAction }: FocusModeP
           goPrev()
           break
         case 'Enter':
-          if (currentLead?.phone) handleCall()
+          handleCall()
           break
         case 'Escape':
           onClose()
@@ -43,19 +61,7 @@ export default function FocusMode({ leads, onClose, onUpdateAction }: FocusModeP
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [currentIndex, showPostpone, currentLead])
-
-  const goNext = useCallback(() => {
-    if (currentIndex < totalLeads - 1) {
-      setCurrentIndex(prev => prev + 1)
-    }
-  }, [currentIndex, totalLeads])
-
-  const goPrev = useCallback(() => {
-    if (currentIndex > 0) {
-      setCurrentIndex(prev => prev - 1)
-    }
-  }, [currentIndex])
+  }, [showPostpone, goNext, goPrev, handleCall, onClose])
 
   const copyToClipboard = async (text: string, field: string) => {
     await navigator.clipboard.writeText(text)
@@ -79,12 +85,6 @@ export default function FocusMode({ leads, onClose, onUpdateAction }: FocusModeP
       cold: { label: 'Froid', bg: 'bg-gray-100', text: 'text-gray-700' },
     }
     return config[priority] || config.cold
-  }
-
-  const handleCall = () => {
-    if (currentLead?.phone) {
-      window.open(`tel:${currentLead.phone}`, '_self')
-    }
   }
 
   const handleEmail = () => {

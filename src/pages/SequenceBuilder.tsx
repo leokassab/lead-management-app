@@ -295,12 +295,19 @@ function SortableStepCard({
 function TimelinePreview({ steps }: { steps: SequenceStep[] }) {
   if (steps.length === 0) return null
 
-  let cumulativeDays = 0
+  // Pre-calculate cumulative days for each step
+  const stepsWithCumulativeDays = steps.reduce<{ step: SequenceStep; cumulativeDays: number }[]>(
+    (acc, step) => {
+      const prevCumulative = acc.length > 0 ? acc[acc.length - 1].cumulativeDays : 0
+      acc.push({ step, cumulativeDays: prevCumulative + step.delay_days })
+      return acc
+    },
+    []
+  )
 
   return (
     <div className="space-y-2">
-      {steps.map((step, index) => {
-        cumulativeDays += step.delay_days
+      {stepsWithCumulativeDays.map(({ step, cumulativeDays }, index) => {
         const actionConfig = ACTION_TYPE_LABELS[step.action_type]
 
         return (

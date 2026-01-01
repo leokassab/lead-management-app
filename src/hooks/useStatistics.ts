@@ -39,11 +39,12 @@ function getDateRange(period: Period): { start: Date; end: Date } {
       end.setDate(0) // Last day of previous month
       end.setHours(23, 59, 59, 999)
       break
-    case 'quarter':
+    case 'quarter': {
       const quarterStart = Math.floor(now.getMonth() / 3) * 3
       start.setMonth(quarterStart, 1)
       start.setHours(0, 0, 0, 0)
       break
+    }
     case 'year':
       start.setMonth(0, 1)
       start.setHours(0, 0, 0, 0)

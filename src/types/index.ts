@@ -10,6 +10,8 @@ export interface User {
   timezone: string
   performance_score: number
   active_leads_count: number
+  monthly_lead_target?: number
+  monthly_closing_target?: number
   created_at: string
   last_login?: string
 }
@@ -268,7 +270,7 @@ export interface Attachment {
 export interface Notification {
   id: string
   user_id: string
-  type: 'comment' | 'assignment' | 'status_change' | 'mention' | 'email_reply' | 'reminder' | 'action_due'
+  type: 'comment' | 'assignment' | 'status_change' | 'mention' | 'email_reply' | 'reminder' | 'action_due' | 'sla_warning' | 'sla_breach'
   lead_id?: string
   message: string
   read: boolean

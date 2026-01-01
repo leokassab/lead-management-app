@@ -123,7 +123,7 @@ export function useAutoScoring() {
     } catch (error) {
       console.error('Error triggering auto-scoring:', error)
     }
-  }, [profile?.team_id])
+  }, [profile])
 
   return { triggerAutoScoring }
 }
