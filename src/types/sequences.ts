@@ -74,6 +74,7 @@ export interface Sequence {
   steps: SequenceStep[]
   stop_conditions: StopCondition[]
   auto_enroll_rules?: AutoEnrollRules
+  formation_type_ids?: string[] // Types de formation associés (vide = tous)
   total_enrolled: number
   total_completed: number
   total_converted: number
@@ -140,6 +141,7 @@ export interface SequenceFormData {
   steps: SequenceStep[]
   stop_conditions: StopCondition[]
   auto_enroll_rules?: AutoEnrollRules
+  formation_type_ids?: string[]
   active: boolean
 }
 

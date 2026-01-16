@@ -3,12 +3,24 @@ import { supabase } from '../lib/supabase'
 import { useAuthStore } from '../stores/authStore'
 import type { LeadSequence, Sequence } from '../types/sequences'
 
-export function useLeadSequence(leadId: string | undefined) {
+export function useLeadSequence(leadId: string | undefined, leadFormationTypeId?: string) {
   const { profile } = useAuthStore()
   const [leadSequence, setLeadSequence] = useState<LeadSequence | null>(null)
-  const [availableSequences, setAvailableSequences] = useState<Sequence[]>([])
+  const [allSequences, setAllSequences] = useState<Sequence[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  // Filter sequences based on lead's formation type
+  const availableSequences = useMemo(() => {
+    return allSequences.filter(seq => {
+      // If sequence has no formation_type_ids restriction, it's available for all
+      if (!seq.formation_type_ids || seq.formation_type_ids.length === 0) return true
+      // If lead has no formation type, only show unrestricted sequences
+      if (!leadFormationTypeId) return false
+      // Check if lead's formation type is in sequence's allowed types
+      return seq.formation_type_ids.includes(leadFormationTypeId)
+    })
+  }, [allSequences, leadFormationTypeId])
 
   const fetchLeadSequence = useCallback(async () => {
     if (!leadId) return
@@ -55,7 +67,7 @@ export function useLeadSequence(leadId: string | undefined) {
 
       if (fetchError) throw fetchError
 
-      setAvailableSequences(data || [])
+      setAllSequences(data || [])
     } catch (err) {
       console.error('Error fetching available sequences:', err)
     }

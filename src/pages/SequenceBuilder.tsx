@@ -19,6 +19,7 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 import { Button } from '../components/ui'
 import { useSequences, useSequence } from '../hooks/useSequences'
+import { useFormationTypes } from '../hooks/useFormationTypes'
 import {
   type SequenceStep,
   type StopCondition,
@@ -336,11 +337,14 @@ export default function SequenceBuilder() {
 
   const { createSequence, updateSequence } = useSequences()
   const { sequence: existingSequence, loading: loadingSequence } = useSequence(id)
+  const { formationTypes, activeFormationTypes } = useFormationTypes()
 
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [steps, setSteps] = useState<SequenceStep[]>([createDefaultStep(1)])
   const [stopConditions, setStopConditions] = useState<StopCondition[]>(DEFAULT_STOP_CONDITIONS)
+  const [formationTypeIds, setFormationTypeIds] = useState<string[]>([])
+  const [showFormationDropdown, setShowFormationDropdown] = useState(false)
   const [active, setActive] = useState(true)
   const [saving, setSaving] = useState(false)
 
@@ -351,6 +355,7 @@ export default function SequenceBuilder() {
       setDescription(existingSequence.description || '')
       setSteps(existingSequence.steps.length > 0 ? existingSequence.steps : [createDefaultStep(1)])
       setStopConditions(existingSequence.stop_conditions || DEFAULT_STOP_CONDITIONS)
+      setFormationTypeIds(existingSequence.formation_type_ids || [])
       setActive(existingSequence.active)
     }
   }, [existingSequence])
@@ -423,6 +428,7 @@ export default function SequenceBuilder() {
         description: description.trim() || undefined,
         steps,
         stop_conditions: stopConditions,
+        formation_type_ids: formationTypeIds.length > 0 ? formationTypeIds : undefined,
         active,
       }
 
@@ -515,6 +521,92 @@ export default function SequenceBuilder() {
                   rows={2}
                 />
               </div>
+
+              {/* Formation Types Multi-select */}
+              {activeFormationTypes.length > 0 && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Types de formation associés
+                  </label>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setShowFormationDropdown(!showFormationDropdown)}
+                      className="w-full px-4 py-2 border rounded-lg bg-white text-left flex items-center justify-between hover:border-gray-400"
+                    >
+                      <div className="flex items-center gap-2 flex-wrap flex-1">
+                        {formationTypeIds.length === 0 ? (
+                          <span className="text-gray-500">Tous les types (par défaut)</span>
+                        ) : (
+                          formationTypeIds.map(id => {
+                            const ft = formationTypes.find(f => f.id === id)
+                            return ft ? (
+                              <span
+                                key={id}
+                                className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium text-white"
+                                style={{ backgroundColor: ft.color }}
+                              >
+                                {ft.name}
+                              </span>
+                            ) : null
+                          })
+                        )}
+                      </div>
+                      <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+
+                    {showFormationDropdown && (
+                      <>
+                        <div className="fixed inset-0 z-10" onClick={() => setShowFormationDropdown(false)} />
+                        <div className="absolute top-full mt-1 left-0 right-0 bg-white border rounded-lg shadow-lg z-20 max-h-64 overflow-y-auto">
+                          <div className="p-2 border-b">
+                            <button
+                              type="button"
+                              onClick={() => setFormationTypeIds([])}
+                              className={`w-full px-3 py-2 text-left rounded text-sm hover:bg-gray-50 ${
+                                formationTypeIds.length === 0 ? 'bg-blue-50 text-blue-700' : 'text-gray-700'
+                              }`}
+                            >
+                              Tous les types (par défaut)
+                            </button>
+                          </div>
+                          <div className="p-2">
+                            {activeFormationTypes.map(ft => (
+                              <label
+                                key={ft.id}
+                                className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 rounded cursor-pointer"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={formationTypeIds.includes(ft.id)}
+                                  onChange={(e) => {
+                                    if (e.target.checked) {
+                                      setFormationTypeIds([...formationTypeIds, ft.id])
+                                    } else {
+                                      setFormationTypeIds(formationTypeIds.filter(id => id !== ft.id))
+                                    }
+                                  }}
+                                  className="rounded border-gray-300 text-blue-600"
+                                />
+                                <span
+                                  className="w-3 h-3 rounded-full"
+                                  style={{ backgroundColor: ft.color }}
+                                />
+                                <span className="text-sm text-gray-700">{ft.name}</span>
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Si vide, la séquence sera disponible pour tous les leads
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Steps */}

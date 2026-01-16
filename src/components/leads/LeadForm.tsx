@@ -4,7 +4,10 @@ import { supabase } from '../../lib/supabase'
 import { useAuthStore } from '../../stores/authStore'
 import { analyzeAndApplyToLead, getTeamAIConfig, autoGenerateScriptForLead } from '../../services/ai'
 import { enrichAndSaveLead } from '../../services/enrichmentService'
-import type { Lead, CustomStatus, User } from '../../types'
+import { autoEnrollLeadInSequence } from '../../services/sequenceAutoEnrollment'
+import { findBestUserForLeadWithReason } from '../../hooks/useUserFormationAssignments'
+import { checkForDuplicate, markAsDuplicate } from '../../services/duplicateService'
+import type { Lead, CustomStatus, User, FormationType } from '../../types'
 
 interface LeadFormProps {
   isOpen: boolean
@@ -13,6 +16,7 @@ interface LeadFormProps {
   lead?: Lead | null
   statuses: CustomStatus[]
   teamMembers: User[]
+  formationTypes?: FormationType[]
 }
 
 const SOURCES = [
@@ -51,6 +55,7 @@ export default function LeadForm({
   lead,
   statuses,
   teamMembers,
+  formationTypes = [],
 }: LeadFormProps) {
   const { profile } = useAuthStore()
   const isEditing = !!lead
@@ -69,6 +74,7 @@ export default function LeadForm({
     sector: lead?.sector || '',
     company_size: lead?.company_size || '',
     lead_type: lead?.lead_type || 'B2B',
+    formation_type_id: lead?.formation_type_id || '',
     source: lead?.source || 'manual',
     priority: lead?.priority || 'cold',
     status: lead?.status || statuses[0]?.name || 'Opt-in',
@@ -90,10 +96,33 @@ export default function LeadForm({
     setLoading(true)
 
     try {
+      // For new leads, try to auto-assign based on formation type if no explicit assignment
+      let assignedTo = formData.assigned_to
+      let assignmentReason = ''
+
+      if (!isEditing && profile?.team_id && formData.formation_type_id) {
+        // Try to find the best user for this formation type (with calendar check)
+        const assignmentResult = await findBestUserForLeadWithReason(profile.team_id, formData.formation_type_id)
+        if (assignmentResult.userId) {
+          assignedTo = assignmentResult.userId
+          assignmentReason = assignmentResult.reason
+
+          // Include info about skipped users if any
+          if (assignmentResult.skippedUsers && assignmentResult.skippedUsers.length > 0) {
+            const skippedInfo = assignmentResult.skippedUsers
+              .map(u => `${u.userName} (${u.reason})`)
+              .join(', ')
+            assignmentReason += ` - Commerciaux sautés: ${skippedInfo}`
+          }
+        }
+      }
+
       const leadData = {
         ...formData,
+        assigned_to: assignedTo,
         full_name: `${formData.first_name} ${formData.last_name}`.trim(),
         team_id: profile?.team_id,
+        formation_type_id: formData.formation_type_id || null,
         updated_at: new Date().toISOString(),
       }
 
@@ -105,6 +134,22 @@ export default function LeadForm({
 
         if (updateError) throw updateError
       } else {
+        // Check for duplicates before creating
+        let duplicateInfo: { originalLeadId: string; matchingFields: string[] } | null = null
+        if (profile?.team_id && (formData.email || formData.phone)) {
+          const duplicateCheck = await checkForDuplicate(
+            profile.team_id,
+            formData.email,
+            formData.phone
+          )
+          if (duplicateCheck.isDuplicate && duplicateCheck.originalLead) {
+            duplicateInfo = {
+              originalLeadId: duplicateCheck.originalLead.id,
+              matchingFields: duplicateCheck.matchingFields,
+            }
+          }
+        }
+
         const { data: newLead, error: insertError } = await supabase
           .from('leads')
           .insert(leadData)
@@ -112,6 +157,28 @@ export default function LeadForm({
           .single()
 
         if (insertError) throw insertError
+
+        // Mark as duplicate if one was found
+        if (newLead && duplicateInfo && profile?.team_id) {
+          await markAsDuplicate(
+            newLead.id,
+            duplicateInfo.originalLeadId,
+            duplicateInfo.matchingFields,
+            profile.team_id
+          )
+        }
+
+        // Log assignment activity if auto-assigned
+        if (newLead && assignmentReason && profile) {
+          supabase.from('activities').insert({
+            lead_id: newLead.id,
+            user_id: profile.id,
+            activity_type: 'assignment',
+            description: assignmentReason,
+          }).then(({ error }) => {
+            if (error) console.error('Error logging assignment activity:', error)
+          })
+        }
 
         // Trigger auto-scoring, auto-enrichment, and auto-script generation for new leads (runs in background)
         if (newLead && profile?.team_id) {
@@ -134,6 +201,12 @@ export default function LeadForm({
                 .catch(err => console.error('Auto-script generation error:', err))
             }
           })
+
+          // Auto-enroll in sequence if lead has a formation type
+          if (newLead.formation_type_id) {
+            autoEnrollLeadInSequence(newLead.id, newLead.formation_type_id, profile.team_id, profile.id)
+              .catch(err => console.error('Auto-enrollment error:', err))
+          }
         }
       }
 
@@ -269,6 +342,18 @@ export default function LeadForm({
               onChange={(e) => handleChange('lead_type', e.target.value)}
               options={LEAD_TYPES}
             />
+            {formationTypes.length > 0 && (
+              <Select
+                label="Formation"
+                value={formData.formation_type_id}
+                onChange={(e) => handleChange('formation_type_id', e.target.value)}
+                options={formationTypes.filter(ft => ft.is_active).map(ft => ({
+                  value: ft.id,
+                  label: ft.name,
+                }))}
+                placeholder="Sélectionner..."
+              />
+            )}
             <Select
               label="Source"
               value={formData.source}

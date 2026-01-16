@@ -14,6 +14,11 @@ export interface User {
   monthly_closing_target?: number
   created_at: string
   last_login?: string
+  // Calendar connections
+  google_calendar_connected?: boolean
+  google_calendar_email?: string
+  outlook_connected?: boolean
+  outlook_email?: string
 }
 
 export interface Team {
@@ -27,6 +32,9 @@ export interface Team {
   created_at: string
   owner_id: string
   ai_config?: AIConfig
+  // Calendar assignment settings
+  assignment_check_calendar?: boolean
+  assignment_fallback_strategy?: 'next_available' | 'round_robin' | 'manual'
 }
 
 // AI Configuration
@@ -139,6 +147,7 @@ export interface Lead {
   sector?: string
   company_size?: '1-10' | '11-50' | '51-200' | '201-500' | '500+'
   lead_type?: 'B2B' | 'B2C'
+  formation_type_id?: string
   is_decision_maker: boolean
 
   // Scoring & Qualification
@@ -199,8 +208,16 @@ export interface Lead {
   created_at: string
   updated_at: string
 
+  // Duplicate tracking
+  is_duplicate?: boolean
+  duplicate_of?: string
+  duplicate_detected_at?: string
+  duplicate_fields?: string[] // ["email", "phone"] - fields that match
+
   // Joined data
   assignedUser?: User
+  originalLead?: Lead // The lead this is a duplicate of
+  duplicateLeads?: Lead[] // Leads that are duplicates of this one
 }
 
 export interface AIObjection {
@@ -229,6 +246,44 @@ export interface LostReason {
   is_active: boolean
   created_at: string
 }
+
+// Formation Types
+export interface FormationType {
+  id: string
+  team_id: string
+  name: string
+  color: string
+  description?: string
+  is_active: boolean
+  order_position: number
+  created_at: string
+}
+
+// User Formation Assignments
+export interface UserFormationAssignment {
+  id: string
+  team_id: string
+  user_id: string
+  formation_type_id: string
+  day_of_week: number[] | null // [1, 2] = Lundi, Mardi (0=Dimanche, 1=Lundi...), null = tous les jours
+  is_active: boolean
+  priority: number
+  created_at: string
+  // Joined data
+  user?: User
+  formation_type?: FormationType
+}
+
+// Day of week constants
+export const DAYS_OF_WEEK = [
+  { value: 1, label: 'Lundi', short: 'Lun' },
+  { value: 2, label: 'Mardi', short: 'Mar' },
+  { value: 3, label: 'Mercredi', short: 'Mer' },
+  { value: 4, label: 'Jeudi', short: 'Jeu' },
+  { value: 5, label: 'Vendredi', short: 'Ven' },
+  { value: 6, label: 'Samedi', short: 'Sam' },
+  { value: 0, label: 'Dimanche', short: 'Dim' },
+]
 
 export const DEFAULT_LOST_REASONS = [
   'Pas de budget',

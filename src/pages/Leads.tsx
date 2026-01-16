@@ -11,7 +11,7 @@ import { useLeads } from '../hooks/useLeads'
 import { useLeadsInSequences } from '../hooks/useLeadSequence'
 import { isLostStatus } from '../hooks/useLostReasons'
 import { formatDate } from '../utils/formatters'
-import type { Lead, User } from '../types'
+import type { Lead, User, FormationType } from '../types'
 import { LEAD_ACTIONS } from '../types'
 
 type PeriodFilter = 'today' | 'week' | 'month' | 'all'
@@ -26,6 +26,9 @@ export default function Leads() {
   // Team members for assignment
   const [teamMembers, setTeamMembers] = useState<User[]>([])
 
+  // Formation types
+  const [formationTypes, setFormationTypes] = useState<FormationType[]>([])
+
   // Period filter
   const [period, setPeriod] = useState<PeriodFilter>('month')
 
@@ -35,7 +38,9 @@ export default function Leads() {
   const [priorityFilter, setPriorityFilter] = useState('')
   const [actionFilter, setActionFilter] = useState('')
   const [tagFilter, setTagFilter] = useState<string[]>([])
+  const [formationFilter, setFormationFilter] = useState<string[]>([])
   const [assigneeFilter, setAssigneeFilter] = useState('')
+  const [duplicateFilter, setDuplicateFilter] = useState<'all' | 'no_duplicates' | 'duplicates_only'>('all')
 
   // Pagination
   const [currentPage, setCurrentPage] = useState(1)
@@ -53,8 +58,9 @@ export default function Leads() {
   // Dropdown states
   const [showStatusDropdown, setShowStatusDropdown] = useState(false)
   const [showTagDropdown, setShowTagDropdown] = useState(false)
+  const [showFormationDropdown, setShowFormationDropdown] = useState(false)
 
-  // Fetch team members
+  // Fetch team members and formation types
   useEffect(() => {
     if (profile?.team_id) {
       supabase
@@ -63,6 +69,15 @@ export default function Leads() {
         .eq('team_id', profile.team_id)
         .then(({ data }) => {
           if (data) setTeamMembers(data)
+        })
+
+      supabase
+        .from('formation_types')
+        .select('*')
+        .eq('team_id', profile.team_id)
+        .order('order_position')
+        .then(({ data }) => {
+          if (data) setFormationTypes(data)
         })
     }
   }, [profile])
@@ -132,12 +147,21 @@ export default function Leads() {
         if (!hasTag) return false
       }
 
+      // Formation filter (multi-select)
+      if (formationFilter.length > 0 && (!lead.formation_type_id || !formationFilter.includes(lead.formation_type_id))) {
+        return false
+      }
+
       // Assignee filter
       if (assigneeFilter && lead.assigned_to !== assigneeFilter) return false
 
+      // Duplicate filter
+      if (duplicateFilter === 'no_duplicates' && lead.is_duplicate) return false
+      if (duplicateFilter === 'duplicates_only' && !lead.is_duplicate) return false
+
       return true
     })
-  }, [periodFilteredLeads, search, statusFilter, priorityFilter, actionFilter, tagFilter, assigneeFilter])
+  }, [periodFilteredLeads, search, statusFilter, priorityFilter, actionFilter, tagFilter, formationFilter, assigneeFilter, duplicateFilter])
 
   // Pagination
   const totalPages = Math.ceil(filteredLeads.length / ITEMS_PER_PAGE)
@@ -149,7 +173,7 @@ export default function Leads() {
   // Reset page when filters change
   useEffect(() => {
     setCurrentPage(1)
-  }, [search, statusFilter, priorityFilter, actionFilter, tagFilter, assigneeFilter, period])
+  }, [search, statusFilter, priorityFilter, actionFilter, tagFilter, formationFilter, assigneeFilter, duplicateFilter, period])
 
   // Stats (based on period-filtered leads)
   const stats = useMemo(() => {
@@ -309,10 +333,12 @@ export default function Leads() {
     setPriorityFilter('')
     setActionFilter('')
     setTagFilter([])
+    setFormationFilter([])
     setAssigneeFilter('')
+    setDuplicateFilter('all')
   }
 
-  const hasFilters = search || statusFilter.length > 0 || priorityFilter || actionFilter || tagFilter.length > 0 || assigneeFilter
+  const hasFilters = search || statusFilter.length > 0 || priorityFilter || actionFilter || tagFilter.length > 0 || formationFilter.length > 0 || assigneeFilter || duplicateFilter !== 'all'
 
   const getPriorityIndicator = (priority: Lead['priority']) => {
     switch (priority) {
@@ -541,6 +567,46 @@ export default function Leads() {
             </div>
           )}
 
+          {/* Formation Type Multi-select */}
+          {formationTypes.length > 0 && (
+            <div className="relative">
+              <button
+                onClick={() => setShowFormationDropdown(!showFormationDropdown)}
+                className="px-4 py-2 border border-gray-300 rounded-lg bg-white text-sm flex items-center gap-2 hover:border-gray-400"
+              >
+                🎓 Formation {formationFilter.length > 0 && <span className="bg-blue-100 text-blue-700 px-1.5 rounded">{formationFilter.length}</span>}
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+              {showFormationDropdown && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setShowFormationDropdown(false)} />
+                  <div className="absolute top-full mt-1 left-0 bg-white border border-gray-200 rounded-lg shadow-lg z-20 min-w-48 max-h-64 overflow-y-auto">
+                    {formationTypes.filter(ft => ft.is_active).map(formation => (
+                      <label key={formation.id} className="flex items-center gap-2 px-4 py-2 hover:bg-gray-50 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={formationFilter.includes(formation.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setFormationFilter([...formationFilter, formation.id])
+                            } else {
+                              setFormationFilter(formationFilter.filter(f => f !== formation.id))
+                            }
+                          }}
+                          className="rounded border-gray-300"
+                        />
+                        <span className="w-3 h-3 rounded-full" style={{ backgroundColor: formation.color }} />
+                        <span className="text-sm">{formation.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
           {/* Assignee (for manager/admin) */}
           {(profile?.role === 'admin' || profile?.role === 'manager') && (
             <select
@@ -556,6 +622,17 @@ export default function Leads() {
               ))}
             </select>
           )}
+
+          {/* Duplicate filter */}
+          <select
+            value={duplicateFilter}
+            onChange={(e) => setDuplicateFilter(e.target.value as 'all' | 'no_duplicates' | 'duplicates_only')}
+            className="px-4 py-2 border border-gray-300 rounded-lg bg-white text-sm hover:border-gray-400"
+          >
+            <option value="all">Tous les leads</option>
+            <option value="no_duplicates">Sans doublons</option>
+            <option value="duplicates_only">Doublons uniquement</option>
+          </select>
 
           {/* Reset */}
           {hasFilters && (
@@ -609,6 +686,9 @@ export default function Leads() {
                     </th>
                     <th className="p-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Lead / Entreprise</th>
                     <th className="p-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Secteur</th>
+                    {formationTypes.length > 0 && (
+                      <th className="p-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Formation</th>
+                    )}
                     <th className="p-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Action</th>
                     <th className="p-4 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider w-20">Urgence</th>
                     <th className="p-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Contact</th>
@@ -634,6 +714,20 @@ export default function Leads() {
                       <td className="p-4">
                         <div className="flex items-center gap-2">
                           <span className="font-medium text-gray-900">{getLeadName(lead)}</span>
+                          {lead.is_duplicate && (
+                            <span
+                              className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700 cursor-help"
+                              title={`Doublon${lead.duplicate_fields?.length ? ` - ${lead.duplicate_fields.join(', ')} identique(s)` : ''}`}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                if (lead.duplicate_of) {
+                                  navigate(`/leads/${lead.duplicate_of}`)
+                                }
+                              }}
+                            >
+                              DOUBLON
+                            </span>
+                          )}
                           {sequenceMap[lead.id] && (
                             <span
                               className="text-blue-500"
@@ -654,6 +748,21 @@ export default function Leads() {
                           </span>
                         )}
                       </td>
+                      {formationTypes.length > 0 && (
+                        <td className="p-4">
+                          {lead.formation_type_id && (() => {
+                            const formation = formationTypes.find(ft => ft.id === lead.formation_type_id)
+                            return formation ? (
+                              <span
+                                className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium text-white"
+                                style={{ backgroundColor: formation.color }}
+                              >
+                                {formation.name}
+                              </span>
+                            ) : null
+                          })()}
+                        </td>
+                      )}
                       <td className="p-4">
                         <ActionBadge
                           action={lead.current_action}
@@ -821,6 +930,7 @@ export default function Leads() {
         lead={editingLead}
         statuses={statuses}
         teamMembers={teamMembers}
+        formationTypes={formationTypes}
       />
 
       {/* Import Modal */}
@@ -833,6 +943,7 @@ export default function Leads() {
         }}
         statuses={statuses}
         teamMembers={teamMembers}
+        formationTypes={formationTypes}
       />
 
       {/* Lost Reason Modal for bulk status change */}

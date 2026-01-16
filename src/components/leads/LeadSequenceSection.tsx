@@ -7,9 +7,10 @@ import type { Sequence, SequenceStep } from '../../types/sequences'
 
 interface LeadSequenceSectionProps {
   leadId: string
+  leadFormationTypeId?: string
 }
 
-export default function LeadSequenceSection({ leadId }: LeadSequenceSectionProps) {
+export default function LeadSequenceSection({ leadId, leadFormationTypeId }: LeadSequenceSectionProps) {
   const {
     leadSequence,
     availableSequences,
@@ -18,7 +19,7 @@ export default function LeadSequenceSection({ leadId }: LeadSequenceSectionProps
     pauseSequence,
     resumeSequence,
     stopSequence,
-  } = useLeadSequence(leadId)
+  } = useLeadSequence(leadId, leadFormationTypeId)
 
   const [showEnrollModal, setShowEnrollModal] = useState(false)
   const [enrolling, setEnrolling] = useState(false)

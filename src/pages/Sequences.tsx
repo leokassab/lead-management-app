@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Badge } from '../components/ui'
 import { useSequences } from '../hooks/useSequences'
+import { useFormationTypes } from '../hooks/useFormationTypes'
 import { ACTION_TYPE_LABELS } from '../types/sequences'
 import type { Sequence, SequenceStep } from '../types/sequences'
 
@@ -16,7 +17,23 @@ export default function Sequences() {
     deleteSequence,
   } = useSequences()
 
+  const { formationTypes, activeFormationTypes } = useFormationTypes()
+
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
+  const [formationFilter, setFormationFilter] = useState<string[]>([])
+  const [showFormationDropdown, setShowFormationDropdown] = useState(false)
+
+  // Filter sequences by formation type
+  const filteredSequences = useMemo(() => {
+    if (formationFilter.length === 0) return sequences
+
+    return sequences.filter(seq => {
+      // If sequence has no formation types, it matches all
+      if (!seq.formation_type_ids || seq.formation_type_ids.length === 0) return true
+      // Check if any of the sequence's formation types are in the filter
+      return seq.formation_type_ids.some(id => formationFilter.includes(id))
+    })
+  }, [sequences, formationFilter])
 
   const handleToggleActive = async (sequence: Sequence) => {
     await toggleSequenceActive(sequence.id, !sequence.active)
@@ -90,6 +107,56 @@ export default function Sequences() {
         </Button>
       </div>
 
+      {/* Filters */}
+      {activeFormationTypes.length > 0 && (
+        <div className="flex items-center gap-4">
+          <div className="relative">
+            <button
+              onClick={() => setShowFormationDropdown(!showFormationDropdown)}
+              className="px-4 py-2 border border-gray-300 rounded-lg bg-white text-sm flex items-center gap-2 hover:border-gray-400"
+            >
+              🎓 Formation {formationFilter.length > 0 && <span className="bg-blue-100 text-blue-700 px-1.5 rounded">{formationFilter.length}</span>}
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {showFormationDropdown && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setShowFormationDropdown(false)} />
+                <div className="absolute top-full mt-1 left-0 bg-white border border-gray-200 rounded-lg shadow-lg z-20 min-w-48 max-h-64 overflow-y-auto">
+                  {activeFormationTypes.map(ft => (
+                    <label key={ft.id} className="flex items-center gap-2 px-4 py-2 hover:bg-gray-50 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={formationFilter.includes(ft.id)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setFormationFilter([...formationFilter, ft.id])
+                          } else {
+                            setFormationFilter(formationFilter.filter(f => f !== ft.id))
+                          }
+                        }}
+                        className="rounded border-gray-300"
+                      />
+                      <span className="w-3 h-3 rounded-full" style={{ backgroundColor: ft.color }} />
+                      <span className="text-sm">{ft.name}</span>
+                    </label>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+          {formationFilter.length > 0 && (
+            <button
+              onClick={() => setFormationFilter([])}
+              className="text-sm text-gray-600 hover:text-gray-900"
+            >
+              Effacer le filtre
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Error */}
       {error && (
         <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-600">
@@ -98,24 +165,32 @@ export default function Sequences() {
       )}
 
       {/* Empty state */}
-      {sequences.length === 0 ? (
+      {filteredSequences.length === 0 ? (
         <div className="bg-white rounded-lg shadow p-12 text-center">
           <div className="text-6xl mb-4">🔄</div>
           <h2 className="text-xl font-semibold text-gray-900 mb-2">
-            Créez votre première séquence
+            {sequences.length === 0 ? 'Créez votre première séquence' : 'Aucune séquence trouvée'}
           </h2>
           <p className="text-gray-600 mb-6 max-w-md mx-auto">
-            Les séquences automatiques vous permettent de programmer des actions
-            de relance sur plusieurs jours pour vos leads.
+            {sequences.length === 0
+              ? 'Les séquences automatiques vous permettent de programmer des actions de relance sur plusieurs jours pour vos leads.'
+              : 'Aucune séquence ne correspond au filtre sélectionné.'
+            }
           </p>
-          <Button onClick={() => navigate('/sequences/new')} size="lg">
-            + Créer une séquence
-          </Button>
+          {sequences.length === 0 ? (
+            <Button onClick={() => navigate('/sequences/new')} size="lg">
+              + Créer une séquence
+            </Button>
+          ) : (
+            <Button variant="outline" onClick={() => setFormationFilter([])}>
+              Effacer le filtre
+            </Button>
+          )}
         </div>
       ) : (
         /* Sequences list */
         <div className="grid gap-4">
-          {sequences.map((sequence) => (
+          {filteredSequences.map((sequence) => (
             <div
               key={sequence.id}
               className={`bg-white rounded-lg shadow p-6 border-l-4 transition-colors ${
@@ -133,6 +208,25 @@ export default function Sequences() {
                       {sequence.active ? 'Active' : 'Inactive'}
                     </Badge>
                   </div>
+
+                  {/* Formation Types Badges */}
+                  {sequence.formation_type_ids && sequence.formation_type_ids.length > 0 && (
+                    <div className="flex items-center gap-1 mb-2 flex-wrap">
+                      <span className="text-xs text-gray-500 mr-1">🎓</span>
+                      {sequence.formation_type_ids.map(ftId => {
+                        const ft = formationTypes.find(f => f.id === ftId)
+                        return ft ? (
+                          <span
+                            key={ftId}
+                            className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium text-white"
+                            style={{ backgroundColor: ft.color }}
+                          >
+                            {ft.name}
+                          </span>
+                        ) : null
+                      })}
+                    </div>
+                  )}
 
                   {sequence.description && (
                     <p className="text-gray-600 text-sm mb-3 line-clamp-2">

@@ -16,10 +16,14 @@ import {
   disconnectOutlookCalendar,
   isOutlookCalendarConfigured,
 } from '../services/outlookCalendarService'
-import type { CustomStatus, User, AssignmentRule, Team, AIConfig } from '../types'
-import { DEFAULT_AI_CONFIG } from '../types'
+import {
+  getTeamCalendarSettings,
+  updateTeamCalendarSettings,
+} from '../services/calendarAvailabilityService'
+import type { CustomStatus, User, AssignmentRule, Team, AIConfig, FormationType, UserFormationAssignment } from '../types'
+import { DEFAULT_AI_CONFIG, DAYS_OF_WEEK } from '../types'
 
-type Tab = 'profile' | 'team' | 'statuses' | 'rules' | 'ai' | 'integrations' | 'billing'
+type Tab = 'profile' | 'team' | 'statuses' | 'formations' | 'assignments' | 'rules' | 'ai' | 'integrations' | 'billing'
 
 const ROLE_OPTIONS = [
   { value: 'sales', label: 'Commercial' },
@@ -49,6 +53,7 @@ export default function Settings() {
   })
   const [teamMembers, setTeamMembers] = useState<User[]>([])
   const [customStatuses, setCustomStatuses] = useState<CustomStatus[]>([])
+  const [formationTypes, setFormationTypes] = useState<FormationType[]>([])
   const [assignmentRules, setAssignmentRules] = useState<AssignmentRule[]>([])
   const [team, setTeam] = useState<Team | null>(null)
   const [loading, setLoading] = useState(true)
@@ -74,6 +79,24 @@ export default function Settings() {
 
   // Status form
   const [statusForm, setStatusForm] = useState({ name: '', color: '#3B82F6' })
+
+  // Formation type modal
+  const [showFormationModal, setShowFormationModal] = useState(false)
+  const [editingFormation, setEditingFormation] = useState<FormationType | null>(null)
+
+  // Formation type form
+  const [formationForm, setFormationForm] = useState({ name: '', color: '#3B82F6', description: '' })
+
+  // User formation assignments
+  const [formationAssignments, setFormationAssignments] = useState<UserFormationAssignment[]>([])
+  const [showAssignmentModal, setShowAssignmentModal] = useState(false)
+  const [editingAssignment, setEditingAssignment] = useState<UserFormationAssignment | null>(null)
+  const [assignmentForm, setAssignmentForm] = useState({
+    user_id: '',
+    formation_type_id: '',
+    day_of_week: [] as number[],
+    all_days: true,
+  })
 
   // Rule form
   const [ruleForm, setRuleForm] = useState({
@@ -104,18 +127,28 @@ export default function Settings() {
   const [outlookEmail, setOutlookEmail] = useState<string | null>(null)
   const [outlookConnecting, setOutlookConnecting] = useState(false)
 
+  // Calendar assignment settings
+  const [calendarCheckEnabled, setCalendarCheckEnabled] = useState(false)
+  const [calendarFallbackStrategy, setCalendarFallbackStrategy] = useState<'next_available' | 'round_robin' | 'manual'>('round_robin')
+  const [calendarSettingsSaving, setCalendarSettingsSaving] = useState(false)
+
   const fetchData = useCallback(async () => {
     if (!profile?.team_id) return
 
     setLoading(true)
     try {
-      const [membersRes, statusesRes, rulesRes, teamRes] = await Promise.all([
+      const [membersRes, statusesRes, formationsRes, rulesRes, teamRes, assignmentsRes] = await Promise.all([
         supabase
           .from('users')
           .select('*')
           .eq('team_id', profile.team_id),
         supabase
           .from('custom_statuses')
+          .select('*')
+          .eq('team_id', profile.team_id)
+          .order('order_position'),
+        supabase
+          .from('formation_types')
           .select('*')
           .eq('team_id', profile.team_id)
           .order('order_position'),
@@ -129,16 +162,32 @@ export default function Settings() {
           .select('*')
           .eq('id', profile.team_id)
           .single(),
+        supabase
+          .from('user_formation_assignments')
+          .select(`
+            *,
+            user:users(*),
+            formation_type:formation_types(*)
+          `)
+          .eq('team_id', profile.team_id)
+          .order('priority', { ascending: false }),
       ])
 
       if (membersRes.data) setTeamMembers(membersRes.data)
       if (statusesRes.data) setCustomStatuses(statusesRes.data)
+      if (formationsRes.data) setFormationTypes(formationsRes.data)
       if (rulesRes.data) setAssignmentRules(rulesRes.data)
       if (teamRes.data) setTeam(teamRes.data)
+      if (assignmentsRes.data) setFormationAssignments(assignmentsRes.data)
 
       // Fetch AI config
       const config = await getTeamAIConfig(profile.team_id)
       setAIConfig(config)
+
+      // Fetch calendar assignment settings
+      const calendarSettings = await getTeamCalendarSettings(profile.team_id)
+      setCalendarCheckEnabled(calendarSettings.checkCalendar)
+      setCalendarFallbackStrategy(calendarSettings.fallbackStrategy)
     } catch (error) {
       console.error('Error fetching data:', error)
     } finally {
@@ -374,6 +423,181 @@ export default function Settings() {
     }
   }
 
+  // Formation type handlers
+  const handleOpenFormationModal = (formation?: FormationType | null) => {
+    if (formation) {
+      setEditingFormation(formation)
+      setFormationForm({ name: formation.name, color: formation.color, description: formation.description || '' })
+    } else {
+      setEditingFormation(null)
+      setFormationForm({ name: '', color: DEFAULT_COLORS[formationTypes.length % DEFAULT_COLORS.length], description: '' })
+    }
+    setShowFormationModal(true)
+  }
+
+  const handleSaveFormation = async () => {
+    if (!profile?.team_id || !formationForm.name) return
+
+    try {
+      if (editingFormation) {
+        const { error } = await supabase
+          .from('formation_types')
+          .update({ name: formationForm.name, color: formationForm.color, description: formationForm.description || null })
+          .eq('id', editingFormation.id)
+
+        if (error) throw error
+      } else {
+        const { error } = await supabase
+          .from('formation_types')
+          .insert({
+            team_id: profile.team_id,
+            name: formationForm.name,
+            color: formationForm.color,
+            description: formationForm.description || null,
+            order_position: formationTypes.length,
+            is_active: true,
+          })
+
+        if (error) throw error
+      }
+
+      fetchData()
+      setShowFormationModal(false)
+    } catch (err) {
+      console.error('Error saving formation type:', err)
+      alert('Erreur lors de l\'enregistrement')
+    }
+  }
+
+  const handleDeleteFormation = async (formationId: string) => {
+    if (!confirm('Êtes-vous sûr de vouloir supprimer ce type de formation ?')) return
+
+    try {
+      const { error } = await supabase
+        .from('formation_types')
+        .delete()
+        .eq('id', formationId)
+
+      if (error) throw error
+      fetchData()
+    } catch (err) {
+      console.error('Error deleting formation type:', err)
+      alert('Erreur lors de la suppression')
+    }
+  }
+
+  const handleToggleFormation = async (formation: FormationType) => {
+    try {
+      const { error } = await supabase
+        .from('formation_types')
+        .update({ is_active: !formation.is_active })
+        .eq('id', formation.id)
+
+      if (error) throw error
+      fetchData()
+    } catch (err) {
+      console.error('Error toggling formation type:', err)
+    }
+  }
+
+  // User formation assignment handlers
+  const handleOpenAssignmentModal = (assignment?: UserFormationAssignment | null) => {
+    if (assignment) {
+      setEditingAssignment(assignment)
+      setAssignmentForm({
+        user_id: assignment.user_id,
+        formation_type_id: assignment.formation_type_id,
+        day_of_week: assignment.day_of_week || [],
+        all_days: !assignment.day_of_week || assignment.day_of_week.length === 0,
+      })
+    } else {
+      setEditingAssignment(null)
+      setAssignmentForm({
+        user_id: '',
+        formation_type_id: '',
+        day_of_week: [],
+        all_days: true,
+      })
+    }
+    setShowAssignmentModal(true)
+  }
+
+  const handleSaveAssignment = async () => {
+    if (!profile?.team_id || !assignmentForm.user_id || !assignmentForm.formation_type_id) return
+
+    try {
+      const assignmentData = {
+        team_id: profile.team_id,
+        user_id: assignmentForm.user_id,
+        formation_type_id: assignmentForm.formation_type_id,
+        day_of_week: assignmentForm.all_days ? null : assignmentForm.day_of_week,
+        is_active: true,
+        priority: 0,
+      }
+
+      if (editingAssignment) {
+        const { error } = await supabase
+          .from('user_formation_assignments')
+          .update(assignmentData)
+          .eq('id', editingAssignment.id)
+
+        if (error) throw error
+      } else {
+        const { error } = await supabase
+          .from('user_formation_assignments')
+          .insert(assignmentData)
+
+        if (error) throw error
+      }
+
+      fetchData()
+      setShowAssignmentModal(false)
+    } catch (err) {
+      console.error('Error saving assignment:', err)
+      alert('Erreur lors de l\'enregistrement')
+    }
+  }
+
+  const handleDeleteAssignment = async (assignmentId: string) => {
+    if (!confirm('Êtes-vous sûr de vouloir supprimer cette attribution ?')) return
+
+    try {
+      const { error } = await supabase
+        .from('user_formation_assignments')
+        .delete()
+        .eq('id', assignmentId)
+
+      if (error) throw error
+      fetchData()
+    } catch (err) {
+      console.error('Error deleting assignment:', err)
+      alert('Erreur lors de la suppression')
+    }
+  }
+
+  const handleToggleAssignment = async (assignment: UserFormationAssignment) => {
+    try {
+      const { error } = await supabase
+        .from('user_formation_assignments')
+        .update({ is_active: !assignment.is_active })
+        .eq('id', assignment.id)
+
+      if (error) throw error
+      fetchData()
+    } catch (err) {
+      console.error('Error toggling assignment:', err)
+    }
+  }
+
+  const handleDayToggle = (day: number) => {
+    setAssignmentForm(prev => {
+      const newDays = prev.day_of_week.includes(day)
+        ? prev.day_of_week.filter(d => d !== day)
+        : [...prev.day_of_week, day]
+      return { ...prev, day_of_week: newDays }
+    })
+  }
+
   // Rule handlers
   const handleOpenRuleModal = (rule?: AssignmentRule) => {
     if (rule) {
@@ -524,6 +748,8 @@ export default function Settings() {
     { id: 'profile' as Tab, label: '👤 Profil', show: true },
     { id: 'team' as Tab, label: '👥 Équipe', show: profile?.role === 'admin' || profile?.role === 'manager' },
     { id: 'statuses' as Tab, label: '🏷️ Statuts', show: profile?.role === 'admin' || profile?.role === 'manager' },
+    { id: 'formations' as Tab, label: '🎓 Formations', show: profile?.role === 'admin' },
+    { id: 'assignments' as Tab, label: '👥 Attribution', show: profile?.role === 'admin' || profile?.role === 'manager' },
     { id: 'rules' as Tab, label: '⚙️ Règles', show: profile?.role === 'admin' || profile?.role === 'manager' },
     { id: 'ai' as Tab, label: '🤖 IA', show: profile?.role === 'admin' || profile?.role === 'manager' },
     { id: 'integrations' as Tab, label: '🔌 Intégrations', show: profile?.role === 'admin' },
@@ -649,6 +875,8 @@ export default function Settings() {
                           <th className="p-3 text-left text-sm font-medium text-gray-600">Membre</th>
                           <th className="p-3 text-left text-sm font-medium text-gray-600">Rôle</th>
                           <th className="p-3 text-left text-sm font-medium text-gray-600">Leads actifs</th>
+                          <th className="p-3 text-left text-sm font-medium text-gray-600">Formations</th>
+                          <th className="p-3 text-left text-sm font-medium text-gray-600">📅</th>
                           <th className="p-3 text-left text-sm font-medium text-gray-600">
                             <div className="flex items-center gap-1">
                               🎯 Obj. Leads/mois
@@ -693,6 +921,42 @@ export default function Settings() {
                               )}
                             </td>
                             <td className="p-3 text-sm">{member.active_leads_count}</td>
+                            <td className="p-3">
+                              <div className="flex flex-wrap gap-1 max-w-48">
+                                {formationAssignments
+                                  .filter(a => a.user_id === member.id && a.is_active)
+                                  .map(a => a.formation_type)
+                                  .filter((ft, index, arr) => ft && arr.findIndex(f => f?.id === ft.id) === index) // unique
+                                  .map(ft => ft && (
+                                    <span
+                                      key={ft.id}
+                                      className="px-2 py-0.5 rounded-full text-xs font-medium"
+                                      style={{ backgroundColor: ft.color + '20', color: ft.color }}
+                                    >
+                                      {ft.name}
+                                    </span>
+                                  ))}
+                                {formationAssignments.filter(a => a.user_id === member.id && a.is_active).length === 0 && (
+                                  <span className="text-xs text-gray-400">-</span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="p-3">
+                              {(() => {
+                                const hasCalendar = member.google_calendar_connected || member.outlook_connected
+                                return (
+                                  <span
+                                    title={hasCalendar
+                                      ? `Calendrier connecté${member.google_calendar_connected ? ' (Google)' : ''}${member.outlook_connected ? ' (Outlook)' : ''}`
+                                      : 'Ce commercial ne sera pas vérifié pour les dispos'
+                                    }
+                                    className="cursor-help"
+                                  >
+                                    {hasCalendar ? '✅' : '❌'}
+                                  </span>
+                                )
+                              })()}
+                            </td>
                             <td className="p-3">
                               {(profile?.role === 'admin' || profile?.role === 'manager') ? (
                                 <input
@@ -802,18 +1066,304 @@ export default function Settings() {
               </div>
             )}
 
-            {/* Rules Tab */}
-            {activeTab === 'rules' && (
+            {/* Formations Tab */}
+            {activeTab === 'formations' && (
               <div className="bg-white rounded-lg shadow p-6">
                 <div className="flex justify-between items-center mb-6">
                   <div>
-                    <h2 className="text-lg font-semibold">Règles d'attribution</h2>
-                    <p className="text-sm text-gray-500">Automatisez l'assignation des leads</p>
+                    <h2 className="text-lg font-semibold">Types de formation</h2>
+                    <p className="text-sm text-gray-500">Gérez les types de formation pour classer vos leads</p>
                   </div>
-                  <Button onClick={() => handleOpenRuleModal()}>+ Ajouter une règle</Button>
+                  <Button onClick={() => handleOpenFormationModal()}>+ Ajouter un type</Button>
                 </div>
 
                 {loading ? (
+                  <div className="text-center py-8 text-gray-500">Chargement...</div>
+                ) : formationTypes.length === 0 ? (
+                  <div className="text-center py-12 text-gray-500">
+                    <div className="text-4xl mb-2">🎓</div>
+                    <p>Aucun type de formation</p>
+                    <Button className="mt-4" onClick={() => handleOpenFormationModal()}>
+                      Créer votre premier type
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {formationTypes.map((formation, index) => (
+                      <div
+                        key={formation.id}
+                        className="flex items-center gap-4 p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
+                      >
+                        <span className="cursor-grab text-gray-400 hover:text-gray-600">⋮⋮</span>
+                        <div className="flex items-center gap-2 text-gray-400 text-sm w-8">
+                          {index + 1}
+                        </div>
+                        <div
+                          className="w-6 h-6 rounded-full border-2 border-white shadow"
+                          style={{ backgroundColor: formation.color }}
+                        />
+                        <div className="flex-1">
+                          <span className="font-medium">{formation.name}</span>
+                          {formation.description && (
+                            <p className="text-sm text-gray-500">{formation.description}</p>
+                          )}
+                        </div>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={formation.is_active}
+                            onChange={() => handleToggleFormation(formation)}
+                            className="w-4 h-4 rounded"
+                          />
+                          <span className="text-sm text-gray-500">Actif</span>
+                        </label>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleOpenFormationModal(formation)}
+                        >
+                          ✏️
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleDeleteFormation(formation.id)}
+                        >
+                          🗑️
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Assignments Tab */}
+            {activeTab === 'assignments' && (
+              <div className="bg-white rounded-lg shadow p-6">
+                <div className="flex justify-between items-center mb-6">
+                  <div>
+                    <h2 className="text-lg font-semibold">Attribution par formation</h2>
+                    <p className="text-sm text-gray-500">Configurez quel commercial gère quels types de formation, et quel jour</p>
+                  </div>
+                  <Button onClick={() => handleOpenAssignmentModal()}>+ Ajouter une attribution</Button>
+                </div>
+
+                {loading ? (
+                  <div className="text-center py-8 text-gray-500">Chargement...</div>
+                ) : formationAssignments.length === 0 ? (
+                  <div className="text-center py-12 text-gray-500">
+                    <div className="text-4xl mb-2">👥</div>
+                    <p>Aucune attribution configurée</p>
+                    <p className="text-sm mt-1">Les nouveaux leads ne seront pas automatiquement assignés par formation</p>
+                    <Button className="mt-4" onClick={() => handleOpenAssignmentModal()}>
+                      Créer votre première attribution
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead>
+                        <tr className="border-b">
+                          <th className="p-3 text-left text-sm font-medium text-gray-600">Commercial</th>
+                          <th className="p-3 text-left text-sm font-medium text-gray-600">Formation</th>
+                          <th className="p-3 text-left text-sm font-medium text-gray-600">Jours</th>
+                          <th className="p-3 text-left text-sm font-medium text-gray-600">Actif</th>
+                          <th className="p-3"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {formationAssignments.map((assignment) => (
+                          <tr key={assignment.id} className="border-b hover:bg-gray-50">
+                            <td className="p-3">
+                              <div className="flex items-center gap-2">
+                                <span className="font-medium">
+                                  {assignment.user?.first_name} {assignment.user?.last_name}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="p-3">
+                              {assignment.formation_type && (
+                                <span
+                                  className="px-2 py-0.5 rounded-full text-xs font-medium"
+                                  style={{ backgroundColor: assignment.formation_type.color + '20', color: assignment.formation_type.color }}
+                                >
+                                  {assignment.formation_type.name}
+                                </span>
+                              )}
+                            </td>
+                            <td className="p-3">
+                              {!assignment.day_of_week || assignment.day_of_week.length === 0 ? (
+                                <span className="text-sm text-gray-500">Tous les jours</span>
+                              ) : (
+                                <div className="flex gap-1 flex-wrap">
+                                  {DAYS_OF_WEEK
+                                    .filter(d => assignment.day_of_week?.includes(d.value))
+                                    .map(d => (
+                                      <span
+                                        key={d.value}
+                                        className="px-2 py-0.5 bg-gray-100 rounded text-xs"
+                                      >
+                                        {d.short}
+                                      </span>
+                                    ))}
+                                </div>
+                              )}
+                            </td>
+                            <td className="p-3">
+                              <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={assignment.is_active}
+                                  onChange={() => handleToggleAssignment(assignment)}
+                                  className="w-4 h-4 rounded"
+                                />
+                              </label>
+                            </td>
+                            <td className="p-3">
+                              <div className="flex gap-1">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => handleOpenAssignmentModal(assignment)}
+                                >
+                                  ✏️
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => handleDeleteAssignment(assignment.id)}
+                                >
+                                  🗑️
+                                </Button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Info box */}
+                <div className="mt-6 p-4 bg-blue-50 rounded-lg border border-blue-200">
+                  <div className="flex items-start gap-3">
+                    <span className="text-xl">💡</span>
+                    <div>
+                      <p className="text-sm text-blue-800">
+                        <strong>Comment ça marche :</strong> Lorsqu'un nouveau lead arrive avec un type de formation,
+                        il sera automatiquement assigné au commercial configuré pour cette formation (si le jour correspond).
+                      </p>
+                      <p className="text-sm text-blue-600 mt-2">
+                        Si plusieurs commerciaux sont configurés pour la même formation et le même jour,
+                        le système utilisera un round-robin basé sur la charge de travail actuelle.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Rules Tab */}
+            {activeTab === 'rules' && (
+              <div className="space-y-6">
+                {/* Calendar Availability Check */}
+                <div className="bg-white rounded-lg shadow p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xl">📅</span>
+                        <h3 className="font-semibold">Vérifier les disponibilités calendrier</h3>
+                      </div>
+                      <p className="text-sm text-gray-500 mt-1">
+                        Avant d'attribuer un lead, vérifier si le commercial a un créneau libre dans son calendrier
+                      </p>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        const newValue = !calendarCheckEnabled
+                        setCalendarCheckEnabled(newValue)
+                        setCalendarSettingsSaving(true)
+                        await updateTeamCalendarSettings(profile?.team_id || '', { checkCalendar: newValue })
+                        setCalendarSettingsSaving(false)
+                      }}
+                      disabled={calendarSettingsSaving}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                        calendarCheckEnabled ? 'bg-indigo-600' : 'bg-gray-200'
+                      }`}
+                    >
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        calendarCheckEnabled ? 'translate-x-6' : 'translate-x-1'
+                      }`} />
+                    </button>
+                  </div>
+
+                  {calendarCheckEnabled && (
+                    <div className="mt-4 pt-4 border-t space-y-4">
+                      <div className="p-3 bg-blue-50 rounded-lg border border-blue-200">
+                        <p className="text-sm text-blue-800">
+                          <strong>Important :</strong> Les commerciaux doivent connecter leur Google Calendar ou Outlook dans la section Intégrations pour que cette fonctionnalité fonctionne.
+                        </p>
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Si aucun commercial n'est disponible :
+                        </label>
+                        <select
+                          value={calendarFallbackStrategy}
+                          onChange={async (e) => {
+                            const newValue = e.target.value as 'next_available' | 'round_robin' | 'manual'
+                            setCalendarFallbackStrategy(newValue)
+                            setCalendarSettingsSaving(true)
+                            await updateTeamCalendarSettings(profile?.team_id || '', { fallbackStrategy: newValue })
+                            setCalendarSettingsSaving(false)
+                          }}
+                          disabled={calendarSettingsSaving}
+                          className="w-full max-w-md border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                        >
+                          <option value="next_available">Assigner au prochain disponible</option>
+                          <option value="round_robin">Round-robin classique (ignorer calendrier)</option>
+                          <option value="manual">Laisser non assigné (attribution manuelle)</option>
+                        </select>
+                      </div>
+
+                      {/* Team members calendar status */}
+                      <div className="mt-4">
+                        <p className="text-sm font-medium text-gray-700 mb-2">Statut des calendriers :</p>
+                        <div className="flex flex-wrap gap-2">
+                          {teamMembers.map(member => {
+                            const hasCalendar = member.google_calendar_connected || member.outlook_connected
+                            return (
+                              <div
+                                key={member.id}
+                                className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm ${
+                                  hasCalendar ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-500'
+                                }`}
+                                title={hasCalendar ? 'Calendrier connecté' : 'Ce commercial ne sera pas vérifié pour les dispos'}
+                              >
+                                <span>{hasCalendar ? '✅' : '❌'}</span>
+                                <span>{member.first_name} {member.last_name}</span>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Assignment Rules */}
+                <div className="bg-white rounded-lg shadow p-6">
+                  <div className="flex justify-between items-center mb-6">
+                    <div>
+                      <h2 className="text-lg font-semibold">Règles d'attribution</h2>
+                      <p className="text-sm text-gray-500">Automatisez l'assignation des leads</p>
+                    </div>
+                    <Button onClick={() => handleOpenRuleModal()}>+ Ajouter une règle</Button>
+                  </div>
+
+                  {loading ? (
                   <div className="text-center py-8 text-gray-500">Chargement...</div>
                 ) : assignmentRules.length === 0 ? (
                   <div className="text-center py-12 text-gray-500">
@@ -879,6 +1429,7 @@ export default function Settings() {
                     ))}
                   </div>
                 )}
+                </div>
               </div>
             )}
 
@@ -1427,6 +1978,137 @@ export default function Settings() {
             </Button>
             <Button onClick={handleSaveStatus}>
               {editingStatus ? 'Enregistrer' : 'Créer'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Formation Type Modal */}
+      <Modal
+        isOpen={showFormationModal}
+        onClose={() => setShowFormationModal(false)}
+        title={editingFormation ? 'Modifier le type de formation' : 'Nouveau type de formation'}
+      >
+        <div className="space-y-4">
+          <Input
+            label="Nom du type"
+            value={formationForm.name}
+            onChange={(e) => setFormationForm(prev => ({ ...prev, name: e.target.value }))}
+            placeholder="Ex: MAO, Guitare, Piano..."
+          />
+          <Input
+            label="Description (optionnel)"
+            value={formationForm.description}
+            onChange={(e) => setFormationForm(prev => ({ ...prev, description: e.target.value }))}
+            placeholder="Description du type de formation"
+          />
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Couleur
+            </label>
+            <div className="flex gap-2 flex-wrap">
+              {DEFAULT_COLORS.map(color => (
+                <button
+                  key={color}
+                  onClick={() => setFormationForm(prev => ({ ...prev, color }))}
+                  className={`w-8 h-8 rounded-full border-2 transition-transform ${
+                    formationForm.color === color ? 'border-gray-900 scale-110' : 'border-transparent'
+                  }`}
+                  style={{ backgroundColor: color }}
+                />
+              ))}
+              <input
+                type="color"
+                value={formationForm.color}
+                onChange={(e) => setFormationForm(prev => ({ ...prev, color: e.target.value }))}
+                className="w-8 h-8 rounded cursor-pointer"
+              />
+            </div>
+          </div>
+          <div className="flex justify-end gap-3 pt-4">
+            <Button variant="outline" onClick={() => setShowFormationModal(false)}>
+              Annuler
+            </Button>
+            <Button onClick={handleSaveFormation}>
+              {editingFormation ? 'Enregistrer' : 'Créer'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Assignment Modal */}
+      <Modal
+        isOpen={showAssignmentModal}
+        onClose={() => setShowAssignmentModal(false)}
+        title={editingAssignment ? 'Modifier l\'attribution' : 'Nouvelle attribution'}
+      >
+        <div className="space-y-4">
+          <Select
+            label="Commercial"
+            value={assignmentForm.user_id}
+            onChange={(e) => setAssignmentForm(prev => ({ ...prev, user_id: e.target.value }))}
+            options={teamMembers.map(m => ({
+              value: m.id,
+              label: `${m.first_name} ${m.last_name}`,
+            }))}
+            placeholder="Sélectionner un commercial"
+          />
+
+          <Select
+            label="Type de formation"
+            value={assignmentForm.formation_type_id}
+            onChange={(e) => setAssignmentForm(prev => ({ ...prev, formation_type_id: e.target.value }))}
+            options={formationTypes.filter(ft => ft.is_active).map(ft => ({
+              value: ft.id,
+              label: ft.name,
+            }))}
+            placeholder="Sélectionner une formation"
+          />
+
+          <div>
+            <label className="flex items-center gap-2 mb-3">
+              <input
+                type="checkbox"
+                checked={assignmentForm.all_days}
+                onChange={(e) => setAssignmentForm(prev => ({
+                  ...prev,
+                  all_days: e.target.checked,
+                  day_of_week: e.target.checked ? [] : prev.day_of_week,
+                }))}
+                className="w-4 h-4 rounded"
+              />
+              <span className="text-sm font-medium">Tous les jours</span>
+            </label>
+
+            {!assignmentForm.all_days && (
+              <div className="flex flex-wrap gap-2">
+                {DAYS_OF_WEEK.map(day => (
+                  <button
+                    key={day.value}
+                    type="button"
+                    onClick={() => handleDayToggle(day.value)}
+                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                      assignmentForm.day_of_week.includes(day.value)
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
+                  >
+                    {day.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="flex justify-end gap-3 pt-4">
+            <Button variant="outline" onClick={() => setShowAssignmentModal(false)}>
+              Annuler
+            </Button>
+            <Button
+              onClick={handleSaveAssignment}
+              disabled={!assignmentForm.user_id || !assignmentForm.formation_type_id}
+            >
+              {editingAssignment ? 'Enregistrer' : 'Créer'}
             </Button>
           </div>
         </div>

@@ -12,8 +12,9 @@ import { isLostStatus } from '../hooks/useLostReasons'
 import { useLeadMeetings } from '../hooks/useMeetings'
 import { enrichAndSaveLead } from '../services/enrichmentService'
 import { generateSearchQueries, saveSearchResults, type SearchSuggestionsResult } from '../services/ai'
+import { markAsNotDuplicate, mergeDuplicateIntoOriginal, getOriginalLead, getDuplicatesOfLead } from '../services/duplicateService'
 import { MEETING_TYPE_LABELS, MEETING_STATUS_LABELS } from '../types/meetings'
-import type { Lead, CustomStatus, Activity, User, LeadAction } from '../types'
+import type { Lead, CustomStatus, Activity, User, LeadAction, FormationType } from '../types'
 
 export default function LeadDetail() {
   const { id } = useParams<{ id: string }>()
@@ -22,6 +23,7 @@ export default function LeadDetail() {
 
   const [lead, setLead] = useState<Lead | null>(null)
   const [statuses, setStatuses] = useState<CustomStatus[]>([])
+  const [formationTypes, setFormationTypes] = useState<FormationType[]>([])
   const [activities, setActivities] = useState<Activity[]>([])
   const [teamMembers, setTeamMembers] = useState<User[]>([])
   const [loading, setLoading] = useState(true)
@@ -49,6 +51,11 @@ export default function LeadDetail() {
   const [showSearchModal, setShowSearchModal] = useState(false)
   const [searching, setSearching] = useState(false)
   const [searchResults, setSearchResults] = useState<SearchSuggestionsResult | null>(null)
+
+  // Duplicate handling
+  const [originalLead, setOriginalLead] = useState<Lead | null>(null)
+  const [duplicatesOfThisLead, setDuplicatesOfThisLead] = useState<Lead[]>([])
+  const [duplicateActionLoading, setDuplicateActionLoading] = useState(false)
 
   // Lead meetings
   const { meetings: leadMeetings } = useLeadMeetings(id)
@@ -82,6 +89,15 @@ export default function LeadDetail() {
 
       if (statusesData) setStatuses(statusesData)
 
+      // Fetch formation types
+      const { data: formationsData } = await supabase
+        .from('formation_types')
+        .select('*')
+        .eq('team_id', profile.team_id)
+        .order('order_position')
+
+      if (formationsData) setFormationTypes(formationsData)
+
       // Fetch team members
       const { data: membersData } = await supabase
         .from('users')
@@ -101,6 +117,18 @@ export default function LeadDetail() {
         .order('created_at', { ascending: false })
 
       if (activitiesData) setActivities(activitiesData)
+
+      // Fetch duplicate-related data
+      if (leadData.is_duplicate && leadData.duplicate_of) {
+        const original = await getOriginalLead(leadData.duplicate_of)
+        setOriginalLead(original)
+      } else {
+        setOriginalLead(null)
+      }
+
+      // Fetch leads that are duplicates of this lead
+      const duplicates = await getDuplicatesOfLead(id)
+      setDuplicatesOfThisLead(duplicates)
     } catch (error) {
       console.error('Error fetching lead:', error)
     } finally {
@@ -273,6 +301,71 @@ export default function LeadDetail() {
     }
   }
 
+  // Duplicate actions
+  const handleMarkAsNotDuplicate = async () => {
+    if (!lead) return
+
+    setDuplicateActionLoading(true)
+    try {
+      const success = await markAsNotDuplicate(lead.id)
+      if (success) {
+        setLead({ ...lead, is_duplicate: false, duplicate_of: undefined, duplicate_fields: undefined })
+        setOriginalLead(null)
+
+        // Add activity
+        await supabase.from('activities').insert({
+          lead_id: lead.id,
+          user_id: profile?.id,
+          activity_type: 'note',
+          description: 'Ce lead a été marqué comme non-doublon',
+        })
+
+        fetchData()
+      }
+    } catch (error) {
+      console.error('Error marking as not duplicate:', error)
+    } finally {
+      setDuplicateActionLoading(false)
+    }
+  }
+
+  const handleMergeDuplicate = async () => {
+    if (!lead || !lead.duplicate_of || !profile) return
+
+    const originalName = originalLead?.full_name || originalLead?.email || 'le lead original'
+    if (!confirm(`Fusionner ce lead avec ${originalName} ?\n\nLes données manquantes seront copiées vers l'original et ce lead sera supprimé.`)) {
+      return
+    }
+
+    setDuplicateActionLoading(true)
+    try {
+      const success = await mergeDuplicateIntoOriginal(lead.id, lead.duplicate_of, profile.id)
+      if (success) {
+        navigate(`/leads/${lead.duplicate_of}`)
+      }
+    } catch (error) {
+      console.error('Error merging duplicate:', error)
+    } finally {
+      setDuplicateActionLoading(false)
+    }
+  }
+
+  const handleDeleteDuplicate = async () => {
+    if (!lead) return
+    if (!confirm('Supprimer définitivement ce doublon ?')) return
+
+    setDuplicateActionLoading(true)
+    try {
+      const { error } = await supabase.from('leads').delete().eq('id', lead.id)
+      if (error) throw error
+      navigate('/leads')
+    } catch (error) {
+      console.error('Error deleting duplicate:', error)
+    } finally {
+      setDuplicateActionLoading(false)
+    }
+  }
+
   const handleActionChange = async (action: LeadAction, date?: string, note?: string) => {
     if (!lead) return
 
@@ -418,9 +511,16 @@ export default function LeadDetail() {
               size="lg"
             />
             <div>
-              <h1 className="text-2xl font-bold text-gray-900">
-                {lead.full_name || `${lead.first_name} ${lead.last_name}`}
-              </h1>
+              <div className="flex items-center gap-2">
+                <h1 className="text-2xl font-bold text-gray-900">
+                  {lead.full_name || `${lead.first_name} ${lead.last_name}`}
+                </h1>
+                {lead.is_duplicate && (
+                  <span className="px-2 py-0.5 text-xs font-bold bg-red-100 text-red-700 rounded border border-red-300">
+                    DOUBLON
+                  </span>
+                )}
+              </div>
               <p className="text-gray-600">{lead.company_name}</p>
               {lead.assignedUser && (
                 <p className="text-sm text-gray-500">
@@ -476,6 +576,128 @@ export default function LeadDetail() {
           </div>
         </div>
       </div>
+
+      {/* Duplicate Alert */}
+      {lead.is_duplicate && originalLead && (
+        <div className="mb-6 p-4 bg-red-50 border border-red-300 rounded-lg">
+          <div className="flex items-start gap-3">
+            <div className="text-2xl">&#9888;&#65039;</div>
+            <div className="flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="font-semibold text-red-800">
+                  Ce contact est un doublon de{' '}
+                  <button
+                    onClick={() => navigate(`/leads/${originalLead.id}`)}
+                    className="text-red-700 underline hover:text-red-900"
+                  >
+                    {originalLead.full_name || `${originalLead.first_name} ${originalLead.last_name}`.trim() || originalLead.email}
+                  </button>
+                </h3>
+              </div>
+              <div className="flex items-center gap-2 mt-2">
+                <span className="text-sm text-red-600">Champs identiques:</span>
+                {lead.duplicate_fields?.map(field => (
+                  <span
+                    key={field}
+                    className="px-2 py-0.5 text-xs font-medium bg-red-200 text-red-800 rounded"
+                  >
+                    {field === 'email' ? 'Email' : field === 'phone' ? 'Téléphone' : field}
+                  </span>
+                ))}
+              </div>
+              {lead.duplicate_detected_at && (
+                <div className="text-xs text-red-500 mt-1">
+                  Détecté le {formatDate(lead.duplicate_detected_at)}
+                </div>
+              )}
+
+              {/* Actions */}
+              <div className="flex items-center gap-3 mt-4 pt-3 border-t border-red-200">
+                <Button
+                  size="sm"
+                  onClick={handleMergeDuplicate}
+                  disabled={duplicateActionLoading}
+                  className="bg-blue-600 hover:bg-blue-700 text-white"
+                >
+                  &#10227; Fusionner avec l'original
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleMarkAsNotDuplicate}
+                  disabled={duplicateActionLoading}
+                >
+                  &#10060; Ce n'est pas un doublon
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={handleDeleteDuplicate}
+                  disabled={duplicateActionLoading}
+                  className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                >
+                  &#128465;&#65039; Supprimer ce doublon
+                </Button>
+              </div>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate(`/leads/${originalLead.id}`)}
+            >
+              Voir l'original &#8594;
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Duplicates of this lead (this lead is the original) */}
+      {duplicatesOfThisLead.length > 0 && (
+        <div className="mb-6 p-4 bg-orange-50 border border-orange-300 rounded-lg">
+          <div className="flex items-start gap-3">
+            <div className="text-2xl">&#128279;</div>
+            <div className="flex-1">
+              <h3 className="font-semibold text-orange-800">
+                {duplicatesOfThisLead.length} doublon{duplicatesOfThisLead.length > 1 ? 's' : ''} de ce contact
+              </h3>
+              <div className="mt-2 space-y-2">
+                {duplicatesOfThisLead.map(dup => (
+                  <div
+                    key={dup.id}
+                    className="flex items-center justify-between p-2 bg-white rounded border border-orange-200"
+                  >
+                    <div>
+                      <span className="font-medium text-gray-900">
+                        {dup.full_name || `${dup.first_name} ${dup.last_name}`.trim() || 'Sans nom'}
+                      </span>
+                      {dup.email && (
+                        <span className="text-sm text-gray-500 ml-2">{dup.email}</span>
+                      )}
+                      <div className="flex gap-1 mt-1">
+                        {dup.duplicate_fields?.map(field => (
+                          <span
+                            key={field}
+                            className="px-1.5 py-0.5 text-xs bg-orange-100 text-orange-700 rounded"
+                          >
+                            {field}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => navigate(`/leads/${dup.id}`)}
+                    >
+                      Voir
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Main content */}
@@ -628,6 +850,30 @@ export default function LeadDetail() {
               <InfoItem icon="📊" label="Secteur" value={lead.sector} />
               <InfoItem icon="👥" label="Taille" value={lead.company_size} />
               <InfoItem icon="🏷️" label="Type" value={lead.lead_type} />
+              {/* Formation type with colored badge */}
+              <div className="flex items-start gap-2">
+                <span>🎓</span>
+                <div>
+                  <div className="text-sm text-gray-500">Formation</div>
+                  {lead.formation_type_id ? (
+                    (() => {
+                      const formation = formationTypes.find(ft => ft.id === lead.formation_type_id)
+                      return formation ? (
+                        <span
+                          className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium text-white"
+                          style={{ backgroundColor: formation.color }}
+                        >
+                          {formation.name}
+                        </span>
+                      ) : (
+                        <div className="text-gray-400">-</div>
+                      )
+                    })()
+                  ) : (
+                    <div className="text-gray-400">-</div>
+                  )}
+                </div>
+              </div>
               <InfoItem icon="✅" label="Décisionnaire" value={lead.is_decision_maker ? 'Oui' : 'Non'} />
               <InfoItem icon="📥" label="Source" value={lead.source} />
             </div>
@@ -761,7 +1007,7 @@ export default function LeadDetail() {
           </section>
 
           {/* Séquence */}
-          <LeadSequenceSection leadId={lead.id} />
+          <LeadSequenceSection leadId={lead.id} leadFormationTypeId={lead.formation_type_id} />
 
           {/* RDV */}
           <section className="bg-white rounded-lg shadow p-6">
